@@ -1,0 +1,101 @@
+# =========================
+# Dependencies
+# =========================
+node_modules/
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# Build Output
+# =========================
+dist/
+build/
+coverage/
+
+# =========================
+# Cache
+# =========================
+.cache/
+.parcel-cache/
+.vite/
+.eslintcache
+
+# =========================
+# Operating System Files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# IDEs & Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.iml
+
+# =========================
+# Temporary Files
+# =========================
+tmp/
+temp/
+*.tmp
+
+# =========================
+# Package Manager
+# =========================
+.pnp/
+.pnp.js
+
+# Keep lock files (recommended)
+# package-lock.json
+# pnpm-lock.yaml
+# yarn.lock
+
+# =========================
+# Test Results
+# =========================
+.nyc_output/
+coverage/
+
+# =========================
+# TypeScript
+# =========================
+*.tsbuildinfo
+
+# =========================
+# Runtime Data
+# =========================
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# =========================
+# Optional Uploads
+# Uncomment if your app stores uploads locally
+# =========================
+# uploads/
+# public/uploads/
+
+# =========================
+# Miscellaneous
+# =========================
+*.tgz

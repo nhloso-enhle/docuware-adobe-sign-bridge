@@ -1,0 +1,29 @@
+{
+  "name": "dw-sign-bridge",
+  "version": "1.0.0",
+  "description": "DocuWare ↔ Adobe Acrobat Sign e-signature middleware",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "jest --runInBand --forceExit"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "axios-retry": "^4.4.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "form-data": "^4.0.0",
+    "morgan": "^1.10.0",
+    "uuid": "^10.0.0",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {
+    "jest": "29.7.0",
+    "nodemon": "^3.1.4",
+    "supertest": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
