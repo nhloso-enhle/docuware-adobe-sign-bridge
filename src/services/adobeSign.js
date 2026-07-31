@@ -198,11 +198,27 @@ async function uploadTransientDocument(pdfBuffer, fileName) {
 // POST /api/rest/v6/agreements
 // ---------------------------------------------------------------------------
 async function createAgreement(opts) {
+  /*
+   * Adobe Sign participantSetsInfo structure (per API spec):
+   *
+   *   participantSetsInfo: [
+   *     { memberInfos: [{ email, name }], order: 1, role: "SIGNER" },
+   *     { memberInfos: [{ email, name }], order: 2, role: "APPROVER" },
+   *     ...
+   *   ]
+   *
+   * Each signer maps to its own participantSet.
+   * Signing is SEQUENTIAL across different order values.
+   * To sign in PARALLEL, give multiple signers the same order value --
+   * Adobe Sign will deliver to all of them simultaneously at that step.
+   * Default order is the signer's position in the array (1-based).
+   * Default role is SIGNER.
+   */
   var participantSetsInfo = opts.signers.map(function(signer, idx) {
     return {
       memberInfos: [{ email: signer.email, name: signer.name || '' }],
       order:       signer.order != null ? signer.order : idx + 1,
-      role:        'SIGNER',
+      role:        (signer.role || 'SIGNER').toUpperCase(),
     };
   });
 

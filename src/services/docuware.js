@@ -247,6 +247,52 @@ async function replaceSectionData(fileCabinetId, sectionId, pdfBuffer, fileName)
 }
 
 // ---------------------------------------------------------------------------
+// appendSection
+// POST .../FileCabinets/{fc}/Documents/{docId}/Sections?fileName={name}
+//
+// Appends the signed PDF as a NEW section on the existing document record
+// so that both the original and signed PDFs co-exist in the same file
+// cabinet entry. The existing sections are untouched.
+//
+// Same headers as replaceSectionData (raw binary application/pdf body)
+// but targets the document-level Sections collection instead of a specific
+// section's Data endpoint.
+// ---------------------------------------------------------------------------
+async function appendSection(fileCabinetId, documentId, pdfBuffer, fileName) {
+  var url = platformUrl() + '/FileCabinets/' + fileCabinetId + '/Documents/' + documentId + '/Sections';
+  logger.info('[DW] Appending signed PDF as new section', {
+    documentId: documentId,
+    fileName:   fileName,
+    bytes:      pdfBuffer.length,
+  });
+
+  var token = await getAccessToken();
+
+  await withRetry(
+    function() {
+      return axios.post(url, pdfBuffer, {
+        params: { fileName: fileName },
+        headers: {
+          'Authorization':         'Bearer ' + token,
+          'Content-Type':          'application/pdf',
+          'Content-Disposition':   'file; filename="' + fileName + '"',
+          'X-File-ModifiedDate':   new Date().toISOString(),
+          'Accept':                'application/json',
+        },
+        maxContentLength: Infinity,
+        maxBodyLength:    Infinity,
+      });
+    },
+    { label: 'dw-appendSection' }
+  );
+
+  logger.info('[DW] Signed PDF section appended successfully', {
+    documentId: documentId,
+    fileName:   fileName,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // updateIndexFields
 // PUT .../FileCabinets/{fc}/Documents/{docId}/Fields
 // Body: { Field: [{ FieldName, Item, ItemElementName }] }

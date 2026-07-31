@@ -31,6 +31,7 @@ jest.mock('../src/services/docuware', () => ({
   ]),
   downloadSection:      jest.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake')),
   replaceSectionData:   jest.fn().mockResolvedValue(undefined),
+  appendSection:        jest.fn().mockResolvedValue(undefined),
   updateIndexFields:    jest.fn().mockResolvedValue({}),
 }));
 
@@ -121,7 +122,7 @@ describe('POST /webhooks/docuware', () => {
       .post('/webhooks/docuware')
       .set(dwHeaders(VALID_BODY))
       .send(VALID_BODY);
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(200);
   });
 
   it('accepts valid Bearer token (Web Service Activity path)', async () => {
@@ -130,7 +131,7 @@ describe('POST /webhooks/docuware', () => {
       .set('content-type', 'application/json')
       .set('authorization', 'Bearer test-bridge-key')
       .send(VALID_BODY);
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(200);
     await flushAsync();
   });
 
@@ -177,7 +178,7 @@ describe('POST /webhooks/docuware', () => {
       .set(dwHeaders(VALID_BODY))
       .send(VALID_BODY);
 
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(200);
     await flushAsync();
 
     expect(docuware.markDocumentPending).toHaveBeenCalledWith(
@@ -193,9 +194,30 @@ describe('POST /webhooks/docuware', () => {
       })
     );
 
+    // Each signer maps to its own participantSet (1:1 mapping)
+    const callArgs = sign.createAgreement.mock.calls[0][0];
+    expect(callArgs.signers).toHaveLength(1);
+    expect(callArgs.signers[0].email).toBe('jane@example.com');
+
     const job = jobStore.get('AGR-001');
     expect(job).not.toBeNull();
     expect(job.status).toBe('PENDING');
+  });
+
+  it('continues signing flow when markDocumentPending returns 400', async () => {
+    docuware.markDocumentPending.mockRejectedValueOnce(
+      Object.assign(new Error('DW 400'), { response: { status: 400, data: { Message: 'Field not found' } } })
+    );
+    const res = await request(app)
+      .post('/webhooks/docuware')
+      .set(dwHeaders(VALID_BODY))
+      .send(VALID_BODY);
+    expect(res.status).toBe(200);
+    await flushAsync();
+    // Should still have proceeded to download and send to Adobe Sign
+    expect(docuware.getDocumentSections).toHaveBeenCalled();
+    expect(sign.uploadTransientDocument).toHaveBeenCalled();
+    expect(sign.createAgreement).toHaveBeenCalled();
   });
 
   it('falls back to DW_FILE_CABINET_ID when fileCabinetId omitted from body', async () => {
@@ -204,11 +226,63 @@ describe('POST /webhooks/docuware', () => {
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(200);
     await flushAsync();
     expect(docuware.markDocumentPending).toHaveBeenCalledWith(
       process.env.DW_FILE_CABINET_ID, '999'
     );
+  });
+
+  it('accepts multiple signers with roles and sequential order', async () => {
+    const body = {
+      documentId:    'MULTI-01',
+      fileCabinetId: 'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d',
+      signers: [
+        { email: 'signer1@example.com', name: 'Alice', role: 'SIGNER',   order: 1 },
+        { email: 'signer2@example.com', name: 'Bob',   role: 'SIGNER',   order: 1 },
+        { email: 'approver@example.com', name: 'Carol', role: 'APPROVER', order: 2 },
+      ],
+    };
+    const res = await request(app)
+      .post('/webhooks/docuware')
+      .set(dwHeaders(body))
+      .send(body);
+    expect(res.status).toBe(200);
+    await flushAsync();
+
+    // createAgreement must be called and pass all three participants
+    expect(sign.createAgreement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        signers: body.signers,
+      })
+    );
+  });
+
+  it('returns 400 for an invalid role value', async () => {
+    const body = {
+      documentId: '1',
+      signers: [{ email: 'a@b.com', role: 'DICTATOR' }],
+    };
+    const res = await request(app)
+      .post('/webhooks/docuware')
+      .set(dwHeaders(body))
+      .send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid role/);
+    expect(res.body.validRoles).toBeDefined();
+  });
+
+  it('accepts roles case-insensitively', async () => {
+    const body = {
+      documentId:    'CASE-01',
+      fileCabinetId: 'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d',
+      signers: [{ email: 'a@b.com', role: 'approver' }],
+    };
+    const res = await request(app)
+      .post('/webhooks/docuware')
+      .set(dwHeaders(body))
+      .send(body);
+    expect(res.status).toBe(200);
   });
 });
 
@@ -266,12 +340,14 @@ describe('POST /webhooks/adobe-sign (event delivery)', () => {
     await flushAsync();
 
     expect(sign.downloadSignedDocument).toHaveBeenCalledWith('AGR-FULL');
-    expect(docuware.replaceSectionData).toHaveBeenCalledWith(
+    // Signed PDF is appended as a new section -- original section untouched
+    expect(docuware.appendSection).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d',
-      'SEC-99',
+      '55555',
       expect.any(Buffer),
       'contract_signed.pdf'
     );
+    expect(docuware.replaceSectionData).not.toHaveBeenCalled();
     expect(docuware.markDocumentSigned).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d', '55555'
     );
@@ -292,16 +368,17 @@ describe('POST /webhooks/adobe-sign (event delivery)', () => {
     expect(docuware.getDocumentSections).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d', '55555'
     );
-    // Should have downloaded and stored signed PDF
+    // Should have downloaded and appended signed PDF
     expect(sign.downloadSignedDocument).toHaveBeenCalledWith('AGR-RECOVER');
-    expect(docuware.replaceSectionData).toHaveBeenCalled();
+    expect(docuware.appendSection).toHaveBeenCalled();
+    expect(docuware.replaceSectionData).not.toHaveBeenCalled();
     expect(docuware.markDocumentSigned).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d', '55555'
     );
   });
 
   it('marks job ERROR when DocuWare write fails', async () => {
-    docuware.replaceSectionData.mockRejectedValueOnce(new Error('DW 500'));
+    docuware.appendSection.mockRejectedValueOnce(new Error('DW 500'));
     jobStore.set('AGR-ERR', {
       agreementId: 'AGR-ERR', fileCabinetId: 'fc-1', documentId: '77777',
       sectionId: 'SEC-ERR', fileName: 'doc.pdf',

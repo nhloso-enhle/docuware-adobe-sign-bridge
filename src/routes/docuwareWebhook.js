@@ -55,9 +55,20 @@ router.post('/', verifyDwInbound, async function(req, res) {
   if (!Array.isArray(signers) || signers.length === 0) {
     return res.status(400).json({ error: 'Missing required field: signers (non-empty array)' });
   }
+  var VALID_ROLES = [
+    'SIGNER', 'APPROVER', 'ACCEPTOR', 'FORM_FILLER',
+    'CERTIFIED_RECIPIENT', 'DELEGATE_TO_SIGNER', 'DELEGATE_TO_APPROVER',
+  ];
+
   for (var i = 0; i < signers.length; i++) {
     if (!signers[i].email) {
       return res.status(400).json({ error: 'Each signer must have an email address' });
+    }
+    if (signers[i].role && VALID_ROLES.indexOf(signers[i].role.toUpperCase()) === -1) {
+      return res.status(400).json({
+        error: 'Invalid role "' + signers[i].role + '" for ' + signers[i].email,
+        validRoles: VALID_ROLES,
+      });
     }
   }
   if (!fileCabinetId) {
@@ -67,7 +78,10 @@ router.post('/', verifyDwInbound, async function(req, res) {
   }
 
   // Respond 202 immediately -- DocuWare web service activity has a short timeout
-  res.status(202).json({ status: 'accepted', message: 'Processing started' });
+  // DocuWare Webhooks module requires HTTP 200 to consider the delivery
+  // successful. Any other code (including 202) causes it to retry on a
+  // 2-minute timer. Processing continues asynchronously below.
+  res.status(200).json({ status: 'accepted', message: 'Processing started' });
 
   setImmediate(async function() {
     logger.info('[DW-WEBHOOK] Starting signing flow', {
@@ -76,8 +90,19 @@ router.post('/', verifyDwInbound, async function(req, res) {
     });
 
     try {
-      // 1. Mark document as Pending Signature
-      await docuware.markDocumentPending(fileCabinetId, documentId);
+      // 1. Mark document as Pending Signature (non-fatal -- if the STATUS
+      //    field doesn't exist or is misconfigured the signing flow still runs)
+      try {
+        await docuware.markDocumentPending(fileCabinetId, documentId);
+      } catch (statusErr) {
+        logger.warn('[DW-WEBHOOK] Could not set Pending Signature status -- ' +
+          'continuing with signing flow. Check DW_STATUS_FIELD and ' +
+          'DW_STATUS_PENDING_VALUE in .env.', {
+          documentId: documentId,
+          error:      statusErr.message,
+          dwResponse: statusErr.response && statusErr.response.data,
+        });
+      }
 
       // 2. Get sections: GET .../FileCabinets/{fc}/Sections?DocId={documentId}
       var sections = await docuware.getDocumentSections(fileCabinetId, documentId);

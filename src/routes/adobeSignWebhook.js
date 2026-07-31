@@ -21,7 +21,7 @@
  *      -> externalId.id was encoded as "fileCabinetId|documentId"
  *      -> Re-fetch the section list from DocuWare to get sectionId
  *   4. Download signed combined PDF from Adobe Sign
- *   5. Replace the DocuWare section (raw binary POST)
+ *   5. Append the signed PDF as a new section on the same document record
  *   6. Update STATUS index field to "Signed"
  *   7. Mark job SIGNED in store
  */
@@ -130,19 +130,32 @@ async function processCompletedAgreement(agreementId) {
     // 1. Download signed combined PDF from Adobe Sign
     var signedPdfBuffer = await sign.downloadSignedDocument(agreementId);
 
-    // 2. Replace the section in DocuWare
-    //    POST .../Sections/{sectionId}/Data?fileName=...
+    // 2. Append the signed PDF as a NEW section on the same document.
+    //    POST .../Documents/{documentId}/Sections?fileName=...
     //    Content-Type: application/pdf (raw binary)
+    //    The original section is left untouched -- both PDFs coexist
+    //    in the same file cabinet record.
     var signedFileName = fileName.replace(/\.pdf$/i, '_signed.pdf');
-    await docuware.replaceSectionData(
+    await docuware.appendSection(
       fileCabinetId,
-      sectionId,
+      documentId,
       signedPdfBuffer,
       signedFileName
     );
 
-    // 3. Update STATUS index field
-    await docuware.markDocumentSigned(fileCabinetId, documentId);
+    // 3. Update STATUS index field (non-fatal -- signed PDF is already
+    //    appended; a misconfigured STATUS field should not mark the job as ERROR)
+    try {
+      await docuware.markDocumentSigned(fileCabinetId, documentId);
+    } catch (statusErr) {
+      logger.warn('[SIGN-WEBHOOK] Could not set Signed status -- ' +
+        'signed PDF was appended successfully. ' +
+        'Check DW_STATUS_FIELD and DW_STATUS_SIGNED_VALUE in .env.', {
+        documentId: documentId,
+        error:      statusErr.message,
+        dwResponse: statusErr.response && statusErr.response.data,
+      });
+    }
 
     // 4. Mark job complete
     jobStore.set(agreementId, Object.assign({}, job, {
