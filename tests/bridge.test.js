@@ -144,32 +144,39 @@ describe('POST /webhooks/docuware', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 400 when documentId is missing', async () => {
+  it('returns 200 and logs error when documentId is missing (never 400 to DocuWare)', async () => {
     const body = { signers: [{ email: 'a@b.com' }] };
     const res = await request(app)
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/documentId/);
+    // Always 200 -- DocuWare must never see a non-200 or it retries
+    expect(res.status).toBe(200);
+    await flushAsync();
+    // Validation error logged, signing flow NOT started
+    expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
 
-  it('returns 400 when signers is empty', async () => {
+  it('returns 200 and logs error when signers is empty', async () => {
     const body = { documentId: '1', signers: [] };
     const res = await request(app)
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    await flushAsync();
+    expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
 
-  it('returns 400 when a signer has no email', async () => {
+  it('returns 200 and logs error when a signer has no email', async () => {
     const body = { documentId: '1', signers: [{ name: 'No Email' }] };
     const res = await request(app)
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    await flushAsync();
+    expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
 
   it('returns 202 and runs the full DW -> Sign flow with encoded externalId', async () => {
@@ -258,7 +265,7 @@ describe('POST /webhooks/docuware', () => {
     );
   });
 
-  it('returns 400 for an invalid role value', async () => {
+  it('returns 200 and logs error for an invalid role value', async () => {
     const body = {
       documentId: '1',
       signers: [{ email: 'a@b.com', role: 'DICTATOR' }],
@@ -267,9 +274,9 @@ describe('POST /webhooks/docuware', () => {
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Invalid role/);
-    expect(res.body.validRoles).toBeDefined();
+    expect(res.status).toBe(200);
+    await flushAsync();
+    expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
 
   it('accepts roles case-insensitively', async () => {

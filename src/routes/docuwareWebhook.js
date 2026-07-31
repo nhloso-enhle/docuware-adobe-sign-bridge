@@ -3,33 +3,14 @@
 /*
  * POST /webhooks/docuware
  *
- * Receives notifications from DocuWare -- either from:
- *   A) DocuWare Webhooks module (Integrations -> Webhooks in DW Configuration)
- *      Fires automatically when a document is stored or index data changes.
- *   B) Workflow Designer Web Service activity
- *      Fires when a workflow step calls this endpoint.
+ * Receives document triggers from DocuWare -- either:
+ *   A) Webhooks module (DocuWare Configuration -> Integrations -> Webhooks)
+ *   B) Workflow Web Service Activity (Workflow Designer)
  *
- * In both cases DocuWare sends the header:
- *   x-docuware-signature: Base64(HMAC-SHA256(body, orgPassphrase))
- *
- * Configure the request body in DocuWare to send JSON matching this shape:
- * {
- *   "documentId":    "{{DWDOCID}}",
- *   "fileCabinetId": "e6ecd4a1-...",
- *   "signers": [
- *     { "email": "{{SIGNER_EMAIL}}", "name": "{{SIGNER_NAME}}" }
- *   ],
- *   "agreementName": "{{DOCUMENT_TYPE}} {{DOCUMENT_NUMBER}}",
- *   "message":       "Please review and sign."
- * }
- *
- * Use DocuWare's variable tokens ({{FieldName}}) to inject index field values.
- * DWDOCID is a built-in system token for the document ID.
- *
- * Response:
- *   202 Accepted  -- processing started in background
- *   400 Bad Request -- missing/invalid fields
- *   401 Unauthorized -- invalid or missing x-docuware-signature
+ * CRITICAL: Always responds HTTP 200 immediately, even on validation errors.
+ * DocuWare treats any non-200 response as a failed delivery and retries
+ * every 2 minutes indefinitely. Validation problems are logged as errors
+ * so they can be diagnosed without causing retry loops.
  */
 
 const express  = require('express');
@@ -40,7 +21,25 @@ const jobStore = require('../utils/jobStore');
 const logger   = require('../utils/logger');
 const { verifyDwInbound } = require('../middleware/auth');
 
+var VALID_ROLES = [
+  'SIGNER', 'APPROVER', 'ACCEPTOR', 'FORM_FILLER',
+  'CERTIFIED_RECIPIENT', 'DELEGATE_TO_SIGNER', 'DELEGATE_TO_APPROVER',
+];
+
 router.post('/', verifyDwInbound, async function(req, res) {
+
+  // Log the full body immediately after auth passes.
+  // If you see auth verified but nothing after this, the body parse failed.
+  logger.info('[DW-WEBHOOK] Request received', {
+    contentType:  req.headers['content-type'],
+    bodyKeys:     Object.keys(req.body || {}),
+    documentId:   (req.body || {}).documentId,
+    signersCount: Array.isArray((req.body || {}).signers) ? req.body.signers.length : 'not an array',
+  });
+
+  // Always respond 200 first -- DocuWare retries on anything else.
+  // Processing and any errors happen asynchronously after this line.
+  res.status(200).json({ status: 'accepted' });
 
   var body          = req.body || {};
   var documentId    = body.documentId;
@@ -49,63 +48,69 @@ router.post('/', verifyDwInbound, async function(req, res) {
   var message       = body.message;
   var fileCabinetId = body.fileCabinetId || process.env.DW_FILE_CABINET_ID;
 
+  // Validate after responding so DocuWare never retries due to our errors.
+  var validationError = null;
+
   if (!documentId) {
-    return res.status(400).json({ error: 'Missing required field: documentId' });
+    validationError =
+      'Missing documentId. Check the webhook body template in DocuWare -- ' +
+      'ensure {{DWDOCID}} or the equivalent token is included.';
+  } else if (!Array.isArray(signers) || signers.length === 0) {
+    validationError =
+      'signers must be a non-empty array. Check the webhook body template -- ' +
+      'the signers array may be missing or the token may resolve to an empty value.';
+  } else if (!fileCabinetId) {
+    validationError =
+      'fileCabinetId not in body and DW_FILE_CABINET_ID not set in .env.';
+  } else {
+    for (var i = 0; i < signers.length; i++) {
+      if (!signers[i].email) {
+        validationError =
+          'Signer at index ' + i + ' has no email address. ' +
+          'Check that the signer email token resolves to a value for this document.';
+        break;
+      }
+      if (signers[i].role &&
+          VALID_ROLES.indexOf(signers[i].role.toUpperCase()) === -1) {
+        validationError =
+          'Invalid role "' + signers[i].role + '" for signer ' +
+          signers[i].email + '. Valid values: ' + VALID_ROLES.join(', ');
+        break;
+      }
+    }
   }
-  if (!Array.isArray(signers) || signers.length === 0) {
-    return res.status(400).json({ error: 'Missing required field: signers (non-empty array)' });
-  }
-  var VALID_ROLES = [
-    'SIGNER', 'APPROVER', 'ACCEPTOR', 'FORM_FILLER',
-    'CERTIFIED_RECIPIENT', 'DELEGATE_TO_SIGNER', 'DELEGATE_TO_APPROVER',
-  ];
 
-  for (var i = 0; i < signers.length; i++) {
-    if (!signers[i].email) {
-      return res.status(400).json({ error: 'Each signer must have an email address' });
-    }
-    if (signers[i].role && VALID_ROLES.indexOf(signers[i].role.toUpperCase()) === -1) {
-      return res.status(400).json({
-        error: 'Invalid role "' + signers[i].role + '" for ' + signers[i].email,
-        validRoles: VALID_ROLES,
-      });
-    }
-  }
-  if (!fileCabinetId) {
-    return res.status(400).json({
-      error: 'fileCabinetId not provided and DW_FILE_CABINET_ID is not set',
+  if (validationError) {
+    logger.error('[DW-WEBHOOK] Validation failed -- 200 already sent, not retrying', {
+      error:        validationError,
+      documentId:   documentId,
+      fileCabinetId: fileCabinetId,
+      signers:      signers,
     });
+    return;
   }
-
-  // Respond 202 immediately -- DocuWare web service activity has a short timeout
-  // DocuWare Webhooks module requires HTTP 200 to consider the delivery
-  // successful. Any other code (including 202) causes it to retry on a
-  // 2-minute timer. Processing continues asynchronously below.
-  res.status(200).json({ status: 'accepted', message: 'Processing started' });
 
   setImmediate(async function() {
     logger.info('[DW-WEBHOOK] Starting signing flow', {
-      documentId:    documentId,
+      documentId:    String(documentId),
       fileCabinetId: fileCabinetId,
     });
 
     try {
-      // 1. Mark document as Pending Signature (non-fatal -- if the STATUS
-      //    field doesn't exist or is misconfigured the signing flow still runs)
+      // 1. Mark document as Pending Signature (non-fatal)
       try {
-        await docuware.markDocumentPending(fileCabinetId, documentId);
+        await docuware.markDocumentPending(fileCabinetId, String(documentId));
       } catch (statusErr) {
         logger.warn('[DW-WEBHOOK] Could not set Pending Signature status -- ' +
-          'continuing with signing flow. Check DW_STATUS_FIELD and ' +
-          'DW_STATUS_PENDING_VALUE in .env.', {
+          'continuing. Check DW_STATUS_FIELD and DW_STATUS_PENDING_VALUE in .env.', {
           documentId: documentId,
           error:      statusErr.message,
           dwResponse: statusErr.response && statusErr.response.data,
         });
       }
 
-      // 2. Get sections: GET .../FileCabinets/{fc}/Sections?DocId={documentId}
-      var sections = await docuware.getDocumentSections(fileCabinetId, documentId);
+      // 2. Get sections
+      var sections = await docuware.getDocumentSections(fileCabinetId, String(documentId));
 
       var pdfSection = null;
       for (var s = 0; s < sections.length; s++) {
@@ -121,27 +126,19 @@ router.post('/', verifyDwInbound, async function(req, res) {
         || pdfSection.DisplayName
         || ('document-' + documentId + '.pdf');
 
-      logger.info('[DW-WEBHOOK] Selected section', {
-        sectionId: sectionId,
-        fileName:  fileName,
-      });
+      logger.info('[DW-WEBHOOK] Selected section', { sectionId: sectionId, fileName: fileName });
 
-      // 3. Download PDF bytes: GET .../Sections/{sectionId}/Data
+      // 3. Download PDF bytes
       var pdfBuffer = await docuware.downloadSection(fileCabinetId, sectionId);
 
-      // 4. Upload to Adobe Sign as transient document
+      // 4. Upload to Adobe Sign
       var transientDocumentId = await sign.uploadTransientDocument(pdfBuffer, fileName);
 
-      // 5. Create agreement (sends email invite to signers)
-      var name   = agreementName || ('DocuWare Document ' + documentId);
-      // Encode fileCabinetId and documentId together so that if the server
-      // restarts and the in-memory job store is lost, the completion webhook
-      // handler can recover all necessary DocuWare details from Adobe Sign.
-      var encodedExternalId = fileCabinetId + '|' + documentId;
-
+      // 5. Create agreement
+      var encodedExternalId = fileCabinetId + '|' + String(documentId);
       var result = await sign.createAgreement({
         transientDocumentId: transientDocumentId,
-        agreementName:       name,
+        agreementName:       agreementName || ('DocuWare Document ' + documentId),
         signers:             signers,
         externalId:          encodedExternalId,
         message:             message,
@@ -152,7 +149,7 @@ router.post('/', verifyDwInbound, async function(req, res) {
       jobStore.set(agreementId, {
         agreementId:   agreementId,
         fileCabinetId: fileCabinetId,
-        documentId:    documentId,
+        documentId:    String(documentId),
         sectionId:     sectionId,
         fileName:      fileName,
         status:        'PENDING',
@@ -170,6 +167,7 @@ router.post('/', verifyDwInbound, async function(req, res) {
       logger.error('[DW-WEBHOOK] Processing failed', {
         documentId: documentId,
         error:      err.message,
+        dwResponse: err.response && err.response.data,
         stack:      err.stack,
       });
     }
