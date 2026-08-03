@@ -352,6 +352,7 @@ module.exports = {
   getDocumentSections,
   downloadSection,
   replaceSectionData,
+  appendSection,
   updateIndexFields,
   markDocumentPending,
   markDocumentSigned,
