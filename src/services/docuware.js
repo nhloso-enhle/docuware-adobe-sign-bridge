@@ -259,7 +259,11 @@ async function replaceSectionData(fileCabinetId, sectionId, pdfBuffer, fileName)
 // section's Data endpoint.
 // ---------------------------------------------------------------------------
 async function appendSection(fileCabinetId, documentId, pdfBuffer, fileName) {
-  var url = platformUrl() + '/FileCabinets/' + fileCabinetId + '/Documents/' + documentId + '/Sections';
+  // Confirmed endpoint from Postman collection:
+  //   POST .../FileCabinets/{fc}/Sections?DocId={documentId}
+  // Headers: Content-Type: application/pdf, Content-Disposition, X-File-ModifiedDate
+  // (No fileName query param -- filename is only in Content-Disposition for this endpoint)
+  var url = platformUrl() + '/FileCabinets/' + fileCabinetId + '/Sections';
   logger.info('[DW] Appending signed PDF as new section', {
     documentId: documentId,
     fileName:   fileName,
@@ -271,7 +275,7 @@ async function appendSection(fileCabinetId, documentId, pdfBuffer, fileName) {
   await withRetry(
     function() {
       return axios.post(url, pdfBuffer, {
-        params: { fileName: fileName },
+        params: { DocId: documentId },
         headers: {
           'Authorization':         'Bearer ' + token,
           'Content-Type':          'application/pdf',
