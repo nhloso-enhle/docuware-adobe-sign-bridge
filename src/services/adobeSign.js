@@ -223,13 +223,16 @@ async function createAgreement(opts) {
   });
 
   var payload = {
-    fileInfos:           [{ transientDocumentId: opts.transientDocumentId }],
-    name:                opts.agreementName,
-    participantSetsInfo: participantSetsInfo,
-    signatureType:       opts.signatureType || 'ESIGN',
-    state:               'AUTHORING',
-    message:             opts.message || 'Please review and sign the attached document.',
-    externalId:          { id: String(opts.externalId), source: 'DW_BRIDGE' },
+      fileInfos: [{ transientDocumentId: opts.transientDocumentId }],
+      name: opts.agreementName,
+      participantSetsInfo: participantSetsInfo,
+      signatureType: opts.signatureType || 'ESIGN',
+      state: 'AUTHORING',
+      message: opts.message || 'Please review and sign the attached document.',
+      // Combine the namespace directly into the id string:
+      externalId: { 
+          id: `DW_BRIDGE:${opts.externalId}` 
+      }
   };
 
   logger.info('[SIGN] Creating agreement', { name: opts.agreementName, signerCount: opts.signers.length });
