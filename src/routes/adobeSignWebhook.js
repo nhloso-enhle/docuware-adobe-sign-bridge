@@ -138,7 +138,7 @@ async function processCompletedAgreement(agreementId) {
     var signedFileName = fileName.replace(/\.pdf$/i, '_signed.pdf');
     await docuware.replaceSectionData(
       fileCabinetId,
-      documentId,
+      sectionId,
       signedPdfBuffer,
       signedFileName
     );
