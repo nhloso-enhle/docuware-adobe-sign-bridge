@@ -130,13 +130,13 @@ async function processCompletedAgreement(agreementId) {
     // 1. Download signed combined PDF from Adobe Sign
     var signedPdfBuffer = await sign.downloadSignedDocument(agreementId);
 
-    // 2. Replace the original section with the signed PDF.
-    //    PUT .../Documents/{documentId}/Sections/{sectionId}
+    // 2. Append the signed PDF as a NEW section on the same document.
+    //    POST .../Documents/{documentId}/Sections?fileName=...
     //    Content-Type: application/pdf (raw binary)
     //    The original section is left untouched -- both PDFs coexist
     //    in the same file cabinet record.
     var signedFileName = fileName.replace(/\.pdf$/i, '_signed.pdf');
-    await docuware.replaceSection(
+    await docuware.replaceSectionData(
       fileCabinetId,
       documentId,
       signedPdfBuffer,
