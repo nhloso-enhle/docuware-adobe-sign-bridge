@@ -227,7 +227,7 @@ async function createAgreement(opts) {
     name:                opts.agreementName,
     participantSetsInfo: participantSetsInfo,
     signatureType:       opts.signatureType || 'ESIGN',
-    state:               'IN_PROCESS',
+    state:               'AUTHORING',
     message:             opts.message || 'Please review and sign the attached document.',
     externalId:          { id: String(opts.externalId), source: 'DW_BRIDGE' },
   };
