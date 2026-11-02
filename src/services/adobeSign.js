@@ -349,6 +349,60 @@ async function getAgreementStatus(agreementId) {
   return details.status;
 }
 
+/*
+ * recoverJobFromAdobeSign
+ * Fetches agreement details from Adobe Sign when a webhook arrives for an unknown
+ * agreementId (typically after a server restart). Parses the DW_BRIDGE externalId
+ * to recover the DocuWare context.
+ */
+async function recoverJobFromAdobeSign(agreementId) {
+  try {
+    var agreementData = await getAgreementDetails(agreementId);
+    var externalIdObj = agreementData.externalId;
+    var externalIdString = externalIdObj ? externalIdObj.id : null;
+
+    // Validate the DW_BRIDGE prefix namespace
+    if (!externalIdString || !externalIdString.startsWith('DW_BRIDGE:')) {
+      logger.warn(
+        '[SIGN-WEBHOOK] Agreement externalId missing or not from DW_BRIDGE',
+        { agreementId: agreementId, externalId: externalIdObj }
+      );
+      return null;
+    }
+
+    // Strip the prefix and split the DocuWare identifiers
+    // Format stored: "DW_BRIDGE:07923215-c8d1-4e6a-b727-c1fd7b6ab7a7|43"
+    var rawData = externalIdString.replace('DW_BRIDGE:', '');
+    var parts = rawData.split('|');
+    var docGuid = parts[0];
+    var cabinetId = parts[1];
+
+    if (!docGuid) {
+      logger.warn('[SIGN-WEBHOOK] Extracted DocuWare GUID is invalid', { agreementId: agreementId });
+      return null;
+    }
+
+    logger.info(
+      '[SIGN-WEBHOOK] Recovery successful! Re-hydrated job context from externalId.',
+      { agreementId: agreementId, docGuid: docGuid, cabinetId: cabinetId }
+    );
+
+    // Return the job object so your webhook processor can resume execution
+    return {
+      agreementId: agreementId,
+      docGuid: docGuid,
+      cabinetId: cabinetId
+    };
+
+  } catch (err) {
+    logger.error(
+      '[SIGN-WEBHOOK] Exception occurred during job recovery: ' + err.message,
+      { agreementId: agreementId }
+    );
+    return null;
+  }
+}
+
 module.exports = {
   getAccessToken:          getAccessToken,
   uploadTransientDocument: uploadTransientDocument,
