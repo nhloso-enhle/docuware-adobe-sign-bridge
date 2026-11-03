@@ -227,7 +227,7 @@ async function createAgreement(opts) {
       name: opts.agreementName,
       participantSetsInfo: participantSetsInfo,
       signatureType: opts.signatureType || 'ESIGN',
-      state: 'AUTHORING',
+      state: 'IN_PROGRESS',
       message: opts.message || 'Please review and sign the attached document.',
       // Combine the namespace directly into the id string:
       externalId: { 
