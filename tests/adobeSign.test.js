@@ -27,8 +27,8 @@ describe('Adobe Sign recipient signing URL', () => {
       data: {
         signingUrlSetInfos: [{
           signingUrls: [
-            { email: 'later@example.com', signingUrl: 'https://sign.example.com/later' },
-            { email: 'first@example.com', signingUrl: 'https://sign.example.com/first' },
+            { email: 'later@example.com', esignUrl: 'https://sign.example.com/later' },
+            { email: 'first@example.com', esignUrl: 'https://sign.example.com/first' },
           ],
         }],
       },
@@ -65,7 +65,7 @@ describe('Adobe Sign recipient signing URL', () => {
           signingUrlSetInfos: [{
             signingUrls: [{
               email: 'signer@example.com',
-              signingUrl: 'https://sign.example.com/ready',
+              esignUrl: 'https://sign.example.com/ready',
             }],
           }],
         },

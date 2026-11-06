@@ -307,7 +307,8 @@ through the agreement's `emailOption.sendOptions` settings, so DocuWare remains
 the notification channel.
 Adobe Sign may take a few seconds to expose a newly created agreement to its
 signer. The bridge retries only the `AGREEMENT_NOT_EXPOSED` response with
-bounded backoff before treating URL retrieval as a failure.
+bounded backoff and reads the recipient URL from Adobe's `esignUrl` response
+field before treating URL retrieval as a failure.
 
 ---
 

@@ -308,10 +308,11 @@ async function getSigningUrl(agreementId, signers) {
   var recipient = signingUrls.find(function(item) {
     return (item.email || '').toLowerCase() === signer.email.toLowerCase();
   });
-  if (!recipient || !recipient.signingUrl) {
-    throw new Error('Adobe Sign did not return a signing URL for the first signer');
+  var signingUrl = recipient && (recipient.esignUrl || recipient.signingUrl);
+  if (!signingUrl) {
+    throw new Error('Adobe Sign did not return an e-sign URL for the earliest signer');
   }
-  return recipient.signingUrl;
+  return signingUrl;
 }
 
 // ---------------------------------------------------------------------------
