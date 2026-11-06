@@ -134,7 +134,9 @@ async function processCompletedAgreement(agreementId) {
     // Re-detect the letter in the current master before replacing it. This
     // avoids overwriting unrelated pages if the master changed while signing.
     var masterPdf = await docuware.downloadSection(fileCabinetId, sectionId);
-    var range = await pdfSections.findTransmittalPages(masterPdf);
+    var range = await pdfSections.findTransmittalPages(masterPdf, {
+      endAtDocumentEnd: job.isClipped === true,
+    });
     logger.info('[SIGN-WEBHOOK] Replacing detected transmittal pages', {
       documentId: documentId,
       startPage: range.startPage,
@@ -256,19 +258,25 @@ async function recoverJobFromAdobeSign(agreementId) {
     return null;
   }
 
-  var pdfSection = null;
-  for (var s = 0; s < sections.length; s++) {
-    if ((sections[s].ContentType || '').toLowerCase().indexOf('pdf') !== -1) {
-      pdfSection = sections[s];
-      break;
-    }
+  var selected;
+  try {
+    selected = await pdfSections.findTransmittalSection(
+      sections,
+      function(sectionId) {
+        return docuware.downloadSection(fileCabinetId, sectionId);
+      },
+      documentId
+    );
+  } catch (err) {
+    logger.error('[SIGN-WEBHOOK] Could not locate transmittal PDF during recovery', {
+      documentId: documentId,
+      error: err.message,
+    });
+    return null;
   }
-  if (!pdfSection) pdfSection = sections[0];
 
-  var sectionId = pdfSection.Id;
-  var fileName  = pdfSection.OriginalFileName
-    || pdfSection.DisplayName
-    || ('document-' + documentId + '.pdf');
+  var sectionId = selected.section.Id;
+  var fileName = selected.fileName;
 
   logger.info('[SIGN-WEBHOOK] Job recovered successfully', {
     agreementId:   agreementId,
@@ -276,6 +284,7 @@ async function recoverJobFromAdobeSign(agreementId) {
     documentId:    documentId,
     sectionId:     sectionId,
     fileName:      fileName,
+    isClipped:     selected.isClipped,
   });
 
   return {
@@ -284,6 +293,7 @@ async function recoverJobFromAdobeSign(agreementId) {
     documentId:    documentId,
     sectionId:     sectionId,
     fileName:      fileName,
+    isClipped:     selected.isClipped,
     status:        'PENDING',
     createdAt:     Date.now(),
     updatedAt:     Date.now(),

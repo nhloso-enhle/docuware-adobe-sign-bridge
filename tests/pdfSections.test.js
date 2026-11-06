@@ -18,6 +18,12 @@ describe('PDF section handling', () => {
   const endMarkers = process.env.DW_TRANSMITTAL_END_MARKERS;
   const nextMarkers = process.env.DW_TRANSMITTAL_NEXT_SECTION_MARKERS;
 
+  beforeEach(() => {
+    process.env.DW_TRANSMITTAL_START_MARKERS = 'TRANSMITTAL LETTER';
+    process.env.DW_TRANSMITTAL_END_MARKERS = 'END OF TRANSMITTAL';
+    process.env.DW_TRANSMITTAL_NEXT_SECTION_MARKERS = 'GENERAL TERMS';
+  });
+
   afterEach(() => {
     if (startMarkers === undefined) delete process.env.DW_TRANSMITTAL_START_MARKERS;
     else process.env.DW_TRANSMITTAL_START_MARKERS = startMarkers;
@@ -28,9 +34,6 @@ describe('PDF section handling', () => {
   });
 
   it('extracts the transmittal pages between configured markers', async () => {
-    process.env.DW_TRANSMITTAL_START_MARKERS = 'TRANSMITTAL LETTER';
-    process.env.DW_TRANSMITTAL_END_MARKERS = 'END OF TRANSMITTAL';
-    process.env.DW_TRANSMITTAL_NEXT_SECTION_MARKERS = 'GENERAL TERMS';
     const master = await createPdf([
       'Cover page',
       'TRANSMITTAL LETTER',
@@ -61,5 +64,60 @@ describe('PDF section handling', () => {
     const master = await createPdf(['Cover', 'General terms']);
     await expect(pdfSections.extractTransmittalLetter(master))
       .rejects.toThrow('Could not find a transmittal letter start marker');
+  });
+
+  it('downloads every clipped PDF section and selects only the transmittal section', async () => {
+    const unrelatedBefore = await createPdf(['Invoice']);
+    const clippedLetter = await createPdf(['TRANSMITTAL LETTER', 'Letter body']);
+    const unrelatedAfter = await createPdf(['Terms']);
+    const sections = [
+      { Id: 'SEC-1', ContentType: 'application/pdf', OriginalFileName: 'invoice.pdf' },
+      { Id: 'SEC-2', ContentType: 'application/pdf', OriginalFileName: 'letter.pdf' },
+      { Id: 'SEC-3', ContentType: 'application/pdf', OriginalFileName: 'terms.pdf' },
+      { Id: 'SEC-4', ContentType: 'image/tiff', OriginalFileName: 'scan.tif' },
+    ];
+    const files = new Map([
+      ['SEC-1', unrelatedBefore],
+      ['SEC-2', clippedLetter],
+      ['SEC-3', unrelatedAfter],
+    ]);
+    const downloadSection = jest.fn(async (sectionId) => files.get(sectionId));
+
+    const selected = await pdfSections.findTransmittalSection(
+      sections,
+      downloadSection,
+      'DOC-1'
+    );
+
+    expect(downloadSection.mock.calls).toEqual([['SEC-1'], ['SEC-2'], ['SEC-3']]);
+    expect(selected.section.Id).toBe('SEC-2');
+    expect(selected.fileName).toBe('letter.pdf');
+    expect(selected.pdfSectionCount).toBe(3);
+    expect(selected.range).toEqual({ startPage: 0, endPage: 1 });
+  });
+
+  it('preserves stapled PDF handling for a single merged PDF section', async () => {
+    const stapledPdf = await createPdf([
+      'Cover',
+      'TRANSMITTAL LETTER',
+      'END OF TRANSMITTAL',
+      'GENERAL TERMS',
+    ]);
+    const section = {
+      Id: 'SEC-STAPLED',
+      ContentType: 'application/pdf',
+      OriginalFileName: 'stapled.pdf',
+    };
+    const downloadSection = jest.fn().mockResolvedValue(stapledPdf);
+
+    const selected = await pdfSections.findTransmittalSection(
+      [section],
+      downloadSection,
+      'DOC-2'
+    );
+
+    expect(downloadSection).toHaveBeenCalledTimes(1);
+    expect(selected.section).toBe(section);
+    expect(selected.range).toEqual({ startPage: 1, endPage: 2 });
   });
 });

@@ -39,8 +39,8 @@
 │  │  Designer   │                   │   (this service)                    │ │
 │  └─────────────┘                   └──────────────┬──────────────────────┘ │
 │                                                   │  ① authenticate        │
-│  ┌─────────────┐   ⑥ replace transmittal pages    │  ② download master PDF │
-│  │ File Cabinet│◀──────────────────────────────── │  ③ extract letter      │
+│  ┌─────────────┐   ⑥ replace transmittal section  │  ② download PDF sections│
+│  │ File Cabinet│◀──────────────────────────────── │  ③ find/extract letter │
 │  │  (doc store)│   ④ write E_SIGNATURE_URL        │                        │
 │  └─────────────┘                                   │                        │
 │  Workflow continues → native Send Email activity │                        │
@@ -88,8 +88,8 @@ DocuWare Workflow
        │  Body:    { documentId, fileCabinetId, signers, agreementName, message }
        ▼
   ┌─────────────────────────────────────────────────────────────┐
-  │  STEP 1 – Validate and download the master PDF             │
-  │  STEP 2 – Detect and extract transmittal pages              │
+  │  STEP 1 – Validate and retrieve every PDF section           │
+  │  STEP 2 – Locate the transmittal and extract its pages       │
   │  STEP 3 – Create Adobe Sign agreement with the letter        │
   │  STEP 4 – Fetch the first signer's signing URL               │
   │  STEP 5 – Write URL to E_SIGNATURE_URL index field           │
@@ -117,6 +117,25 @@ The DocuWare workflow activity waits for a successful response so its native
 email step cannot run before the signing URL index field has been updated.
 The Adobe Sign completion webhook is acknowledged immediately and processed
 asynchronously.
+
+### Stapled and clipped DocuWare documents
+
+The bridge handles both layouts without combining unrelated PDFs:
+
+- **Stapled (merged):** When the DocuWare document has one PDF section, the
+  existing page-marker detection extracts the transmittal from that PDF and
+  replaces only those pages after signing.
+- **Clipped (separate PDFs):** When it has multiple PDF sections, the bridge
+  downloads each PDF section and searches them for the configured start marker.
+  Exactly one section must match. Only that section's transmittal is sent to
+  Adobe Sign; after completion, the signed pages replace the transmittal in
+  that same section. The other PDF sections remain untouched. If no end or
+  next-section marker is found in the matched clipped PDF, its pages from the
+  start marker through the end of that PDF are treated as the transmittal.
+
+If multiple clipped PDFs contain a start marker, the bridge stops rather than
+choosing a section ambiguously. A document without a matching transmittal also
+fails before its signing URL or workflow email is created.
 
 ---
 
@@ -237,6 +256,9 @@ To create or verify the field in DocuWare Administration:
    section titles used in your PDFs. Start and end markers are included in the
    extracted letter; the following-section marker page is not. The service
    fails safely when markers are missing or the start marker is ambiguous.
+   For clipped documents, where each PDF is a separate section, all PDF
+   sections are downloaded and searched. The end of the matched PDF is used
+   when no end or following-section marker is present.
 
 ### 6.3 Workflow Web Service Activity and Native Email
 

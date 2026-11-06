@@ -46,7 +46,8 @@ async function getPageTexts(pdfBuffer) {
   return pages;
 }
 
-async function findTransmittalPages(pdfBuffer) {
+async function findTransmittalPages(pdfBuffer, options) {
+  options = options || {};
   var pages = await getPageTexts(pdfBuffer);
   var starts = parseMarkers(
     process.env.DW_TRANSMITTAL_START_MARKERS,
@@ -66,6 +67,7 @@ async function findTransmittalPages(pdfBuffer) {
     if (containsMarker(text, starts)) startPages.push(index);
   });
   if (startPages.length !== 1) {
+    if (startPages.length === 0 && options.allowMissingStart) return null;
     throw new Error(
       startPages.length === 0
         ? 'Could not find a transmittal letter start marker in the PDF'
@@ -83,11 +85,72 @@ async function findTransmittalPages(pdfBuffer) {
     }
   }
 
+  if (options.endAtDocumentEnd) {
+    return { startPage: startPage, endPage: pages.length - 1 };
+  }
   throw new Error('Could not find a transmittal letter end or following-section marker in the PDF');
 }
 
-async function extractTransmittalLetter(pdfBuffer) {
-  var range = await findTransmittalPages(pdfBuffer);
+function isPdfSection(section) {
+  var contentType = (section.ContentType || '').toLowerCase();
+  var fileName = section.OriginalFileName || section.DisplayName || '';
+  return contentType.indexOf('pdf') !== -1 || /\.pdf$/i.test(fileName);
+}
+
+function getSectionFileName(section, documentId) {
+  return section.OriginalFileName || section.DisplayName || ('document-' + documentId + '.pdf');
+}
+
+async function findTransmittalSection(sections, downloadSection, documentId) {
+  var pdfList = sections.filter(isPdfSection);
+  if (pdfList.length === 0) throw new Error('Document has no PDF sections to sign');
+
+  if (pdfList.length === 1) {
+    var section = pdfList[0];
+    var pdfBuffer = await downloadSection(section.Id);
+    var range = await findTransmittalPages(pdfBuffer);
+    return {
+      section: section,
+      fileName: getSectionFileName(section, documentId),
+      pdfBuffer: pdfBuffer,
+      range: range,
+      pdfSectionCount: pdfList.length,
+      isClipped: false,
+    };
+  }
+
+  var matches = [];
+  for (var i = 0; i < pdfList.length; i++) {
+    var candidate = pdfList[i];
+    var candidateBuffer = await downloadSection(candidate.Id);
+    var candidateRange = await findTransmittalPages(candidateBuffer, {
+      allowMissingStart: true,
+      endAtDocumentEnd: true,
+    });
+    if (candidateRange) {
+      matches.push({
+        section: candidate,
+        fileName: getSectionFileName(candidate, documentId),
+        pdfBuffer: candidateBuffer,
+        range: candidateRange,
+        pdfSectionCount: pdfList.length,
+        isClipped: true,
+      });
+    }
+  }
+
+  if (matches.length !== 1) {
+    throw new Error(
+      matches.length === 0
+        ? 'Could not find a transmittal letter in any PDF section'
+        : 'Found transmittal markers in multiple PDF sections; refusing an ambiguous selection'
+    );
+  }
+  return matches[0];
+}
+
+async function extractTransmittalLetter(pdfBuffer, range) {
+  range = range || await findTransmittalPages(pdfBuffer);
   var source = await PDFDocument.load(pdfBuffer);
   var letter = await PDFDocument.create();
   var indices = [];
@@ -123,6 +186,7 @@ async function replacePageRange(masterBuffer, signedBuffer, startPage, endPage) 
 
 module.exports = {
   findTransmittalPages: findTransmittalPages,
+  findTransmittalSection: findTransmittalSection,
   extractTransmittalLetter: extractTransmittalLetter,
   replacePageRange: replacePageRange,
 };

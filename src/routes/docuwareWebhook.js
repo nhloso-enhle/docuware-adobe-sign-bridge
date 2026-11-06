@@ -109,23 +109,25 @@ router.post('/', verifyDwInbound, async function(req, res) {
     }
 
     var sections = await docuware.getDocumentSections(fileCabinetId, String(documentId));
-    var pdfSection = null;
-    for (var s = 0; s < sections.length; s++) {
-      if ((sections[s].ContentType || '').toLowerCase().indexOf('pdf') !== -1) {
-        pdfSection = sections[s];
-        break;
-      }
-    }
-    if (!pdfSection) throw new Error('Document has no PDF section to sign');
+    var selected = await pdfSections.findTransmittalSection(
+      sections,
+      function(sectionId) {
+        return docuware.downloadSection(fileCabinetId, sectionId);
+      },
+      documentId
+    );
+    var sectionId = selected.section.Id;
+    var fileName = selected.fileName;
+    logger.info('[DW-WEBHOOK] Selected transmittal PDF section', {
+      sectionId: sectionId,
+      fileName: fileName,
+      pdfSections: selected.pdfSectionCount,
+    });
 
-    var sectionId = pdfSection.Id;
-    var fileName  = pdfSection.OriginalFileName
-      || pdfSection.DisplayName
-      || ('document-' + documentId + '.pdf');
-    logger.info('[DW-WEBHOOK] Selected section', { sectionId: sectionId, fileName: fileName });
-
-    var masterPdf = await docuware.downloadSection(fileCabinetId, sectionId);
-    var extracted = await pdfSections.extractTransmittalLetter(masterPdf);
+    var extracted = await pdfSections.extractTransmittalLetter(
+      selected.pdfBuffer,
+      selected.range
+    );
     var transientDocumentId = await sign.uploadTransientDocument(
       extracted.pdfBuffer,
       fileName.replace(/\.pdf$/i, '') + '_transmittal.pdf'
@@ -150,6 +152,7 @@ router.post('/', verifyDwInbound, async function(req, res) {
       fileName:      fileName,
       startPage:     extracted.startPage,
       endPage:       extracted.endPage,
+      isClipped:     selected.isClipped,
       status:        'PENDING',
       createdAt:     Date.now(),
       updatedAt:     Date.now(),

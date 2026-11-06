@@ -35,6 +35,14 @@ jest.mock('../src/services/docuware', () => ({
 }));
 
 jest.mock('../src/services/pdfSections', () => ({
+  findTransmittalSection: jest.fn(async (sections, downloadSection, documentId) => ({
+    section: sections[0],
+    fileName: sections[0].OriginalFileName || 'document-' + documentId + '.pdf',
+    pdfBuffer: await downloadSection(sections[0].Id),
+    range: { startPage: 1, endPage: 2 },
+    pdfSectionCount: sections.length,
+    isClipped: sections.length > 1,
+  })),
   extractTransmittalLetter: jest.fn().mockResolvedValue({
     startPage: 1,
     endPage: 2,
