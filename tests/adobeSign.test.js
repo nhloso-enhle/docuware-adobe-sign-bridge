@@ -48,6 +48,41 @@ describe('Adobe Sign recipient signing URL', () => {
     );
   });
 
+  it('retries while Adobe Sign is exposing the agreement to the signer', async () => {
+    jest.useFakeTimers();
+    axios.get.mockReset();
+    const notExposed = () => Object.assign(new Error('Agreement not exposed'), {
+      response: {
+        status: 404,
+        data: { code: 'AGREEMENT_NOT_EXPOSED' },
+      },
+    });
+    axios.get
+      .mockRejectedValueOnce(notExposed())
+      .mockRejectedValueOnce(notExposed())
+      .mockResolvedValueOnce({
+        data: {
+          signingUrlSetInfos: [{
+            signingUrls: [{
+              email: 'signer@example.com',
+              signingUrl: 'https://sign.example.com/ready',
+            }],
+          }],
+        },
+      });
+
+    try {
+      const resultPromise = adobeSign.getSigningUrl('AGR-READY', [
+        { email: 'signer@example.com' },
+      ]);
+      await jest.runAllTimersAsync();
+      await expect(resultPromise).resolves.toBe('https://sign.example.com/ready');
+      expect(axios.get).toHaveBeenCalledTimes(3);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('disables Adobe Sign emails so DocuWare owns the notification', async () => {
     await adobeSign.createAgreement({
       transientDocumentId: 'TRANS-1',

@@ -70,6 +70,8 @@ const logger   = require('../utils/logger');
 const { withRetry } = require('../utils/retry');
 
 var _tokenCache = null; // { value: string, expiresAt: number }
+var SIGNING_URL_MAX_ATTEMPTS = 6;
+var SIGNING_URL_MAX_DELAY_MS = 4000;
 
 // ---------------------------------------------------------------------------
 // apiBase -- e.g. https://api.na4.adobesign.com/api/rest/v6
@@ -271,14 +273,33 @@ async function getSigningUrl(agreementId, signers) {
   if (!signer) throw new Error('At least one SIGNER is required to retrieve a signing URL');
 
   var auth = await authHeader();
-  var res = await withRetry(
-    function() {
-      return axios.get(apiBase() + '/agreements/' + agreementId + '/signingUrls', {
-        headers: auth,
+  var url = apiBase() + '/agreements/' + agreementId + '/signingUrls';
+  var res;
+  for (var attempt = 1; attempt <= SIGNING_URL_MAX_ATTEMPTS; attempt++) {
+    try {
+      res = await withRetry(
+        function() {
+          return axios.get(url, { headers: auth });
+        },
+        { label: 'sign-getSigningUrl' }
+      );
+      break;
+    } catch (err) {
+      var response = err.response;
+      var notExposed = response && response.status === 404
+        && response.data && response.data.code === 'AGREEMENT_NOT_EXPOSED';
+      if (!notExposed || attempt === SIGNING_URL_MAX_ATTEMPTS) throw err;
+
+      var delayMs = Math.min(1000 * Math.pow(2, attempt - 1), SIGNING_URL_MAX_DELAY_MS);
+      logger.warn('[SIGN] Signing URL not exposed yet; retrying', {
+        agreementId: agreementId,
+        attempt: attempt,
+        retryInMs: delayMs,
       });
-    },
-    { label: 'sign-getSigningUrl' }
-  );
+      await new Promise(function(resolve) { setTimeout(resolve, delayMs); });
+    }
+  }
+
   var sets = res.data && res.data.signingUrlSetInfos;
   var signingUrls = [];
   (Array.isArray(sets) ? sets : []).forEach(function(set) {
