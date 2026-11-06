@@ -2,10 +2,10 @@
 
 > **DocuWare ↔ Adobe Acrobat Sign e-signature webhook bridge**
 >
-> A production-ready Node.js / Express service that accepts a document from a
-> DocuWare workflow, sends it to Adobe Acrobat Sign for electronic signature,
-> and writes the completed signed PDF back to DocuWare — automatically
-> updating the document's `STATUS` index field to `"Signed"`.
+> A Node.js / Express service that extracts and sends only a detected
+> transmittal letter to Adobe Acrobat Sign, writes its signing URL to DocuWare,
+> and replaces only those pages in the original PDF after signing.
+> DocuWare's native workflow sends the email containing the URL.
 
 ---
 
@@ -39,12 +39,13 @@
 │  │  Designer   │                   │   (this service)                    │ │
 │  └─────────────┘                   └──────────────┬──────────────────────┘ │
 │                                                   │  ① authenticate        │
-│  ┌─────────────┐   ④ replaceSectionData           │  ② download PDF        │
-│  │ File Cabinet│◀──────────────────────────────── │                        │
-│  │  (doc store)│   ⑤ updateIndexFields            │                        │
-│  └─────────────┘      STATUS="Signed"             │                        │
+│  ┌─────────────┐   ⑥ replace transmittal pages    │  ② download master PDF │
+│  │ File Cabinet│◀──────────────────────────────── │  ③ extract letter      │
+│  │  (doc store)│   ④ write E_SIGNATURE_URL        │                        │
+│  └─────────────┘                                   │                        │
+│  Workflow continues → native Send Email activity │                        │
 └───────────────────────────────────────────────────┼────────────────────────┘
-                                                    │ ③ upload PDF to Sign
+                                                    │ ⑤ upload letter to Sign
                                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         Adobe Acrobat Sign                                  │
@@ -53,7 +54,7 @@
 │  POST /api/rest/v6/agreements          ──▶  agreementId                    │
 │  POST /api/rest/v6/webhooks            ──▶  webhook registered             │
 │                                                                             │
-│  ──── signer receives email, reviews & signs in Sign UI ────               │
+│  ──── DocuWare emails the signing URL; recipient signs in Sign UI ────     │
 │                                                                             │
 │  POST /webhooks/adobe-sign (AGREEMENT_WORKFLOW_COMPLETED event)            │
 │       ──▶  GET  /api/rest/v6/agreements/{id}/combinedDocument              │
@@ -70,6 +71,7 @@
 | `src/routes/status.js` | `/health` and `/status/jobs` monitoring endpoints |
 | `src/services/docuware.js` | All DocuWare Platform API calls (auth, download, replace, update) |
 | `src/services/adobeSign.js` | All Adobe Sign API calls (upload, create agreement, download) |
+| `src/services/pdfSections.js` | Transmittal marker detection, PDF extraction, and page replacement |
 | `src/middleware/auth.js` | Shared-secret verification for DocuWare; challenge handler for Sign |
 | `src/utils/jobStore.js` | In-memory agreementId → DocuWare document correlation store |
 | `src/utils/logger.js` | Winston logger with console transport |
@@ -82,22 +84,19 @@
 DocuWare Workflow
        │
        │  POST /webhooks/docuware
-       │  Headers: X-DW-Webhook-Secret: <secret>
+       │  Headers: DocuWare HMAC signature or Authorization: Bearer <API key>
        │  Body:    { documentId, fileCabinetId, signers, agreementName, message }
        ▼
   ┌─────────────────────────────────────────────────────────────┐
-  │  STEP 1 – Validate payload & respond 202 immediately        │
-  │  STEP 2 – markDocumentPending()  →  STATUS = "Pending..."   │
-  │  STEP 3 – getDocumentSections()  →  find first PDF section  │
-  │  STEP 4 – downloadSection()      →  Buffer (PDF bytes)      │
-  │  STEP 5 – uploadTransientDocument()  →  transientDocumentId │
-  │  STEP 6 – createAgreement()          →  agreementId         │
-  │  STEP 7 – registerWebhookForAgreement()                     │
-  │  STEP 8 – jobStore.set(agreementId, { documentId, ... })    │
+  │  STEP 1 – Validate and download the master PDF             │
+  │  STEP 2 – Detect and extract transmittal pages              │
+  │  STEP 3 – Create Adobe Sign agreement with the letter        │
+  │  STEP 4 – Fetch the first signer's signing URL               │
+  │  STEP 5 – Write URL to E_SIGNATURE_URL index field           │
+  │  STEP 6 – Return success; workflow sends native DocuWare email│
   └─────────────────────────────────────────────────────────────┘
        │
-       │  Signer receives email invitation
-       │  Signs document in Adobe Sign UI
+       │  Recipient follows DocuWare's email URL and signs
        ▼
 Adobe Sign (AGREEMENT_WORKFLOW_COMPLETED)
        │
@@ -108,17 +107,16 @@ Adobe Sign (AGREEMENT_WORKFLOW_COMPLETED)
   │  STEP 1 – Respond 200 immediately                           │
   │  STEP 2 – Lookup job by agreementId                         │
   │  STEP 3 – downloadSignedDocument()   →  signed PDF Buffer   │
-  │  STEP 4 – replaceSectionData()       →  section overwritten │
+  │  STEP 4 – Re-detect letter and replace only those pages     │
   │  STEP 5 – markDocumentSigned()       →  STATUS = "Signed"   │
   │  STEP 6 – jobStore.set(…, SIGNED)                           │
   └─────────────────────────────────────────────────────────────┘
 ```
 
-> **Why 202 / 200 immediately?**
-> Both DocuWare HTTP activities and Adobe Sign webhook delivery have short
-> timeouts (typically 10–30 s).  The service acknowledges immediately and
-> handles processing asynchronously via `setImmediate` to avoid HTTP-level
-> timeouts while still delivering reliable processing.
+The DocuWare workflow activity waits for a successful response so its native
+email step cannot run before the signing URL index field has been updated.
+The Adobe Sign completion webhook is acknowledged immediately and processed
+asynchronously.
 
 ---
 
@@ -182,16 +180,22 @@ cp .env.example .env
 | `DW_STATUS_FIELD` | ❌ | Index field DBName for signing status (default: `STATUS`) |
 | `DW_STATUS_SIGNED_VALUE` | ❌ | Value written when signing completes (default: `Signed`) |
 | `DW_STATUS_PENDING_VALUE` | ❌ | Value written when signing starts (default: `Pending Signature`) |
-| `DW_WEBHOOK_SECRET` | ⚠️ | Shared secret DocuWare sends in `X-DW-Webhook-Secret`. Strongly recommended. |
+| `DW_SIGNATURE_URL_FIELD` | ❌ | Text index field DBName for the recipient URL (default: `E_SIGNATURE_URL`) |
+| `DW_TRANSMITTAL_START_MARKERS` | ❌ | Pipe-separated page text anchors (default: `TRANSMITTAL LETTER|ENCLOSED PLEASE FIND`) |
+| `DW_TRANSMITTAL_END_MARKERS` | ❌ | Pipe-separated inclusive end-page anchors (default: `END OF TRANSMITTAL`) |
+| `DW_TRANSMITTAL_NEXT_SECTION_MARKERS` | ❌ | Pipe-separated following-section anchors; that page is excluded (default: `GENERAL TERMS`) |
+| `DW_ORGANIZATION_PASSPHRASE` | ✅ | HMAC secret for DocuWare Webhooks module calls |
+| `DW_BRIDGE_API_KEY` | ✅ | Bearer token for DocuWare Workflow Web Service Activity calls |
 
 ### Adobe Acrobat Sign
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ADOBE_SIGN_BASE_URL` | ✅ | Your Sign shard URL, e.g. `https://api.na4.adobesign.com` |
-| `ADOBE_SIGN_INTEGRATION_KEY` | ✅ | OAuth Integration Key from Sign account → API → API Applications |
+| `ADOBE_SIGN_API_BASE_URL` | ✅ | Adobe Sign `api_access_point`, e.g. `https://api.na4.adobesign.com` |
+| `ADOBE_SIGN_CLIENT_ID` | ✅ | OAuth application client ID |
+| `ADOBE_SIGN_CLIENT_SECRET` | ✅ | OAuth application client secret |
+| `ADOBE_SIGN_REFRESH_TOKEN` | ✅ | OAuth refresh token |
 | `ADOBE_SIGN_WEBHOOK_URL` | ✅ | Public HTTPS base URL of this service, e.g. `https://your.domain.com` |
-| `ADOBE_SIGN_WEBHOOK_SECRET` | ❌ | Shared secret (optional; enterprise tier only) |
 
 ### Server
 
@@ -216,8 +220,9 @@ grant it the following permissions on the target file cabinet:
 
 ### 6.2 Index Fields
 
-The bridge requires a text index field to track signing state.  By default it
-looks for a field with the DBName `STATUS`.
+The bridge uses the `STATUS` text field to track signing state and the
+`E_SIGNATURE_URL` text field to pass the recipient's Adobe Sign URL to the
+native workflow email.
 
 To create or verify the field in DocuWare Administration:
 1. Open **DocuWare Administration** → **File Cabinets** → your cabinet
@@ -225,18 +230,26 @@ To create or verify the field in DocuWare Administration:
    - **DBName**: `STATUS` (or your custom value in `DW_STATUS_FIELD`)
    - **Type**: `Text`
    - Optional: configure a **Select List** with values `Pending Signature` and `Signed`
+3. Add a text index field with DBName `E_SIGNATURE_URL` (or configure
+   `DW_SIGNATURE_URL_FIELD` to the field's DBName). Give the service account
+   permission to edit both fields.
+4. Configure the text anchors in `.env` to match the transmittal and following
+   section titles used in your PDFs. Start and end markers are included in the
+   extracted letter; the following-section marker page is not. The service
+   fails safely when markers are missing or the start marker is ambiguous.
 
-### 6.3 Workflow HTTP Activity
+### 6.3 Workflow Web Service Activity and Native Email
 
-In **DocuWare Workflow Designer**, add an **HTTP Activity** step to the workflow
-at the point where you want to trigger signing:
+In **DocuWare Workflow Designer**, add a **Web Service Activity** at the point
+where the transmittal letter is ready. Configure the existing bridge's
+`POST /webhooks/docuware` endpoint:
 
 | Setting | Value |
 |---------|-------|
 | **Method** | `POST` |
 | **URL** | `https://your.domain.com/webhooks/docuware` |
 | **Content-Type** | `application/json` |
-| **Header** | `X-DW-Webhook-Secret: <your DW_WEBHOOK_SECRET value>` |
+| **Authentication** | Bearer token using the `DW_BRIDGE_API_KEY` value |
 | **Body** | See below |
 
 **Body template** (use DocuWare's variable substitution syntax):
@@ -260,6 +273,13 @@ at the point where you want to trigger signing:
 > `{{SIGNER_EMAIL}}` should be mapped to an index field that contains the
 > intended signer's email address.
 
+The middleware does not send the DocuWare notification email. Configure the
+next workflow step as DocuWare's native **Send Email** activity, with no
+attachment, and include the `E_SIGNATURE_URL` index field in the message body.
+The Web Service Activity returns success only after the agreement is created
+and that field is updated. Configure the Email activity recipient separately
+as appropriate for your workflow.
+
 ---
 
 ## 7. Adobe Acrobat Sign Configuration
@@ -268,33 +288,30 @@ at the point where you want to trigger signing:
 
 1. Log into your Adobe Sign account
 2. Go to **Account** → **Adobe Sign API** → **API Information**
-3. Note the **API Access Point** — this is your `ADOBE_SIGN_BASE_URL`
+3. Note the **API Access Point** — this is your `ADOBE_SIGN_API_BASE_URL`
    (e.g. `https://api.na4.adobesign.com`)
 
-### 7.2 Create an Integration Key
+### 7.2 Configure OAuth
 
-1. Go to **Account** → **Adobe Sign API** → **API Applications**
-2. Click **Create an Application (Integration Key)**
-3. Give it a name (e.g. `DocuWare Bridge`)
-4. Enable the following scopes:
-   - `agreement_send`
-   - `agreement_read`
-   - `agreement_write`
-   - `user_read`
-5. Copy the **Integration Key** — this is your `ADOBE_SIGN_INTEGRATION_KEY`
+Create a **Customer** OAuth application under **Account** → **Adobe Sign API**
+→ **API Applications**. Grant the account scopes used by the bridge:
+`agreement_read:account`, `agreement_send:account`, `agreement_write:account`,
+and `webhook_write:account`. Use its client ID and secret for
+`ADOBE_SIGN_CLIENT_ID` and `ADOBE_SIGN_CLIENT_SECRET`, then complete the OAuth
+authorization-code exchange to obtain `ADOBE_SIGN_REFRESH_TOKEN`. The
+`api_access_point` from that exchange is `ADOBE_SIGN_API_BASE_URL`.
 
-> **Note:** The Integration Key is effectively a long-lived access token.
-> Guard it like a password and rotate it if compromised.
+Keep the client secret and refresh token private. The service refreshes its
+short-lived access token automatically.
 
 ### 7.3 Adobe Sign Webhook Registration
 
-The bridge auto-registers a per-agreement webhook when each agreement is created.
+The bridge auto-registers an account-level webhook at startup.
 No manual setup is required in the Sign UI.  Adobe Sign will send a `GET`
 challenge to `https://your.domain.com/webhooks/adobe-sign` first to verify the
 URL — the bridge handles this automatically.
 
-**Required scopes** for webhook registration: `webhook_write` (included in the
-Integration Key scopes above by default on Business/Enterprise plans).
+**Required scope** for webhook registration: `webhook_write:account`.
 
 ---
 
@@ -407,12 +424,15 @@ ngrok http 3000
 
 ### `POST /webhooks/docuware`
 
-Triggered by DocuWare Workflow HTTP Activity.
+Triggered by DocuWare Workflow Web Service Activity.
 
 **Headers:**
 ```
-Content-Type:       application/json
-X-DW-Webhook-Secret: <DW_WEBHOOK_SECRET>
+Content-Type:  application/json
+Authorization: Bearer <DW_BRIDGE_API_KEY>
+
+Alternatively, the DocuWare Webhooks module may authenticate with
+`x-docuware-signature` using `DW_ORGANIZATION_PASSPHRASE`.
 ```
 
 **Request body:**
@@ -432,11 +452,13 @@ X-DW-Webhook-Secret: <DW_WEBHOOK_SECRET>
 }
 ```
 
-**Response:**
+**Success response (after URL field update):**
 ```json
-{ "status": "accepted", "message": "Processing started" }
+{ "status": "ready", "agreementId": "..." }
 ```
-HTTP 202 — processing continues asynchronously.
+HTTP 200 means the agreement exists and the signing URL has been written to
+the configured DocuWare index field. Invalid input returns HTTP 400; processing
+errors return HTTP 500 so the workflow does not proceed to its Email activity.
 
 ---
 
@@ -470,7 +492,7 @@ Liveness probe. No authentication required.
 ### `GET /status/jobs`
 
 Lists all tracked signature jobs (pending, signed, or errored).
-**Requires** `X-DW-Webhook-Secret` header.
+**Requires** `X-Admin-Key` when `ADMIN_API_KEY` is configured.
 
 ```json
 {
@@ -493,7 +515,7 @@ Lists all tracked signature jobs (pending, signed, or errored).
 
 ### `GET /status/jobs/:agreementId`
 
-Single job detail. **Requires** `X-DW-Webhook-Secret` header.
+Single job detail. **Requires** `X-Admin-Key` when `ADMIN_API_KEY` is configured.
 
 ---
 
@@ -501,9 +523,11 @@ Single job detail. **Requires** `X-DW-Webhook-Secret` header.
 
 ### Shared Secret (DocuWare → Bridge)
 
-Set `DW_WEBHOOK_SECRET` to a strong random string and configure the DocuWare
-workflow HTTP activity to send it in the `X-DW-Webhook-Secret` header.  The
-middleware rejects any request without a matching secret with `HTTP 401`.
+Configure DocuWare's Workflow Web Service Activity to send
+`Authorization: Bearer <DW_BRIDGE_API_KEY>`. Alternatively, the DocuWare
+Webhooks module sends an HMAC signature verified with
+`DW_ORGANIZATION_PASSPHRASE`. Requests without valid authentication receive
+`HTTP 401`.
 
 Generate a strong secret:
 ```bash
@@ -581,11 +605,11 @@ async function get(agreementId) {
 }
 ```
 
-### Full OAuth2 Flow for Adobe Sign
+### Adobe Sign Token Rotation
 
-The Integration Key is convenient but non-rotatable without regeneration.
-For production, implement the full OAuth2 Authorization Code flow and store
-refresh tokens, as documented in Adobe's developer guides.
+The service uses the OAuth2 refresh-token flow. Rotate and renew the configured
+client secret and refresh token according to your organization's credential
+policy.
 
 ### DocuWare Token Refresh
 
@@ -621,7 +645,8 @@ if (!job || job.status === 'SIGNED') return; // already processed
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| `HTTP 401` on `/webhooks/docuware` | Wrong or missing `X-DW-Webhook-Secret` | Check the header value in the DocuWare workflow matches `DW_WEBHOOK_SECRET` |
+| `HTTP 401` on `/webhooks/docuware` | Missing/invalid Bearer token or HMAC | Check `DW_BRIDGE_API_KEY` or `DW_ORGANIZATION_PASSPHRASE` and DocuWare auth setup |
+| Workflow fails before the Send Email activity | The letter markers, Adobe Sign URL, or DocuWare URL index field are not configured | Check the service log, configure matching `DW_TRANSMITTAL_*` markers, and verify `DW_SIGNATURE_URL_FIELD` |
 | `[DW] Discovering Identity Service...` hangs | `DW_SERVER_URL` incorrect | Verify you can reach `https://yourorg.docuware.cloud` from the server |
 | `Invalid URL` during auth | `DW_PLATFORM` missing a slash | Ensure `DW_PLATFORM=DocuWare/Platform` (no leading or trailing slash) |
 | `401 Unauthorized` from DocuWare API | Wrong credentials or scope | Double-check `DW_USERNAME`, `DW_PASSWORD`, `DW_CLIENT_ID`, `DW_SCOPE` |

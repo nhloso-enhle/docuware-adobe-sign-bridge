@@ -7,10 +7,9 @@
  *   A) Webhooks module (DocuWare Configuration -> Integrations -> Webhooks)
  *   B) Workflow Web Service Activity (Workflow Designer)
  *
- * CRITICAL: Always responds HTTP 200 immediately, even on validation errors.
- * DocuWare treats any non-200 response as a failed delivery and retries
- * every 2 minutes indefinitely. Validation problems are logged as errors
- * so they can be diagnosed without causing retry loops.
+ * The workflow activity is acknowledged only after the signing agreement and
+ * its URL index field are ready, so the following native email step cannot
+ * run ahead of the URL update.
  */
 
 const express  = require('express');
@@ -19,6 +18,7 @@ const docuware = require('../services/docuware');
 const sign     = require('../services/adobeSign');
 const jobStore = require('../utils/jobStore');
 const logger   = require('../utils/logger');
+const pdfSections = require('../services/pdfSections');
 const { verifyDwInbound } = require('../middleware/auth');
 
 var VALID_ROLES = [
@@ -37,10 +37,6 @@ router.post('/', verifyDwInbound, async function(req, res) {
     signersCount: Array.isArray((req.body || {}).signers) ? req.body.signers.length : 'not an array',
   });
 
-  // Always respond 200 first -- DocuWare retries on anything else.
-  // Processing and any errors happen asynchronously after this line.
-  res.status(200).json({ status: 'accepted' });
-
   var body          = req.body || {};
   var documentId    = body.documentId;
   var signers       = body.signers;
@@ -48,7 +44,7 @@ router.post('/', verifyDwInbound, async function(req, res) {
   var message       = body.message;
   var fileCabinetId = body.fileCabinetId || process.env.DW_FILE_CABINET_ID;
 
-  // Validate after responding so DocuWare never retries due to our errors.
+  // Validate before making changes in DocuWare or Adobe Sign.
   var validationError = null;
 
   if (!documentId) {
@@ -64,10 +60,14 @@ router.post('/', verifyDwInbound, async function(req, res) {
       'fileCabinetId not in body and DW_FILE_CABINET_ID not set in .env.';
   } else {
     for (var i = 0; i < signers.length; i++) {
-      if (!signers[i].email) {
+      if (typeof signers[i].email !== 'string' || !signers[i].email.trim()) {
         validationError =
           'Signer at index ' + i + ' has no email address. ' +
           'Check that the signer email token resolves to a value for this document.';
+        break;
+      }
+      if (signers[i].role && typeof signers[i].role !== 'string') {
+        validationError = 'Signer at index ' + i + ' has an invalid role.';
         break;
       }
       if (signers[i].role &&
@@ -81,97 +81,113 @@ router.post('/', verifyDwInbound, async function(req, res) {
   }
 
   if (validationError) {
-    logger.error('[DW-WEBHOOK] Validation failed -- 200 already sent, not retrying', {
+    logger.error('[DW-WEBHOOK] Validation failed', {
       error:        validationError,
       documentId:   documentId,
       fileCabinetId: fileCabinetId,
       signers:      signers,
     });
-    return;
+    return res.status(400).json({ error: validationError });
   }
 
-  setImmediate(async function() {
-    logger.info('[DW-WEBHOOK] Starting signing flow', {
-      documentId:    String(documentId),
-      fileCabinetId: fileCabinetId,
-    });
+  logger.info('[DW-WEBHOOK] Starting signing flow', {
+    documentId:    String(documentId),
+    fileCabinetId: fileCabinetId,
+  });
 
+  var agreementId = null;
+  try {
+    // Keep the workflow activity open until its URL index field is ready.
     try {
-      // 1. Mark document as Pending Signature (non-fatal)
-      try {
-        await docuware.markDocumentPending(fileCabinetId, String(documentId));
-      } catch (statusErr) {
-        logger.warn('[DW-WEBHOOK] Could not set Pending Signature status -- ' +
-          'continuing. Check DW_STATUS_FIELD and DW_STATUS_PENDING_VALUE in .env.', {
-          documentId: documentId,
-          error:      statusErr.message,
-          dwResponse: statusErr.response && statusErr.response.data,
-        });
-      }
-
-      // 2. Get sections
-      var sections = await docuware.getDocumentSections(fileCabinetId, String(documentId));
-
-      var pdfSection = null;
-      for (var s = 0; s < sections.length; s++) {
-        if ((sections[s].ContentType || '').toLowerCase().indexOf('pdf') !== -1) {
-          pdfSection = sections[s];
-          break;
-        }
-      }
-      if (!pdfSection) pdfSection = sections[0];
-
-      var sectionId = pdfSection.Id;
-      var fileName  = pdfSection.OriginalFileName
-        || pdfSection.DisplayName
-        || ('document-' + documentId + '.pdf');
-
-      logger.info('[DW-WEBHOOK] Selected section', { sectionId: sectionId, fileName: fileName });
-
-      // 3. Download PDF bytes
-      var pdfBuffer = await docuware.downloadSection(fileCabinetId, sectionId);
-
-      // 4. Upload to Adobe Sign
-      var transientDocumentId = await sign.uploadTransientDocument(pdfBuffer, fileName);
-
-      // 5. Create agreement
-      var encodedExternalId = fileCabinetId + '|' + String(documentId);
-      var result = await sign.createAgreement({
-        transientDocumentId: transientDocumentId,
-        agreementName:       agreementName || ('DocuWare Document ' + documentId),
-        signers:             signers,
-        externalId:          encodedExternalId,
-        message:             message,
-      });
-      var agreementId = result.agreementId;
-
-      // 6. Store job for Adobe Sign callback
-      jobStore.set(agreementId, {
-        agreementId:   agreementId,
-        fileCabinetId: fileCabinetId,
-        documentId:    String(documentId),
-        sectionId:     sectionId,
-        fileName:      fileName,
-        status:        'PENDING',
-        createdAt:     Date.now(),
-        updatedAt:     Date.now(),
-      });
-
-      logger.info('[DW-WEBHOOK] Document sent for signature', {
-        documentId:  documentId,
-        agreementId: agreementId,
-        signerCount: signers.length,
-      });
-
-    } catch (err) {
-      logger.error('[DW-WEBHOOK] Processing failed', {
+      await docuware.markDocumentPending(fileCabinetId, String(documentId));
+    } catch (statusErr) {
+      logger.warn('[DW-WEBHOOK] Could not set Pending Signature status -- continuing.', {
         documentId: documentId,
-        error:      err.message,
-        dwResponse: err.response && err.response.data,
-        stack:      err.stack,
+        error:      statusErr.message,
+        dwResponse: statusErr.response && statusErr.response.data,
       });
     }
-  });
+
+    var sections = await docuware.getDocumentSections(fileCabinetId, String(documentId));
+    var pdfSection = null;
+    for (var s = 0; s < sections.length; s++) {
+      if ((sections[s].ContentType || '').toLowerCase().indexOf('pdf') !== -1) {
+        pdfSection = sections[s];
+        break;
+      }
+    }
+    if (!pdfSection) throw new Error('Document has no PDF section to sign');
+
+    var sectionId = pdfSection.Id;
+    var fileName  = pdfSection.OriginalFileName
+      || pdfSection.DisplayName
+      || ('document-' + documentId + '.pdf');
+    logger.info('[DW-WEBHOOK] Selected section', { sectionId: sectionId, fileName: fileName });
+
+    var masterPdf = await docuware.downloadSection(fileCabinetId, sectionId);
+    var extracted = await pdfSections.extractTransmittalLetter(masterPdf);
+    var transientDocumentId = await sign.uploadTransientDocument(
+      extracted.pdfBuffer,
+      fileName.replace(/\.pdf$/i, '') + '_transmittal.pdf'
+    );
+
+    var encodedExternalId = fileCabinetId + '|' + String(documentId);
+    var result = await sign.createAgreement({
+      transientDocumentId: transientDocumentId,
+      agreementName:       agreementName || ('DocuWare Document ' + documentId),
+      signers:             signers,
+      externalId:          encodedExternalId,
+      message:             message,
+    });
+    agreementId = result.agreementId;
+    if (!agreementId) throw new Error('Adobe Sign did not return an agreement ID');
+
+    jobStore.set(agreementId, {
+      agreementId:   agreementId,
+      fileCabinetId: fileCabinetId,
+      documentId:    String(documentId),
+      sectionId:     sectionId,
+      fileName:      fileName,
+      startPage:     extracted.startPage,
+      endPage:       extracted.endPage,
+      status:        'PENDING',
+      createdAt:     Date.now(),
+      updatedAt:     Date.now(),
+    });
+
+    var signingUrl = await sign.getSigningUrl(agreementId, signers);
+    await docuware.updateIndexFields(fileCabinetId, String(documentId), [{
+      FieldName: process.env.DW_SIGNATURE_URL_FIELD || 'E_SIGNATURE_URL',
+      Item: signingUrl,
+      ItemElementName: 'String',
+    }]);
+
+    logger.info('[DW-WEBHOOK] Signing URL written to DocuWare index field', {
+      documentId: documentId,
+      agreementId: agreementId,
+      fieldName: process.env.DW_SIGNATURE_URL_FIELD || 'E_SIGNATURE_URL',
+      signerCount: signers.length,
+    });
+    return res.status(200).json({ status: 'ready', agreementId: agreementId });
+  } catch (err) {
+    if (agreementId) {
+      var job = jobStore.get(agreementId);
+      if (job) {
+        jobStore.set(agreementId, Object.assign({}, job, {
+          status: 'ERROR',
+          error: err.message,
+          updatedAt: Date.now(),
+        }));
+      }
+    }
+    logger.error('[DW-WEBHOOK] Processing failed before workflow can continue', {
+      documentId: documentId,
+      error:      err.message,
+      dwResponse: err.response && err.response.data,
+      stack:      err.stack,
+    });
+    return res.status(500).json({ error: 'Could not prepare document for signature' });
+  }
 });
 
 module.exports = router;

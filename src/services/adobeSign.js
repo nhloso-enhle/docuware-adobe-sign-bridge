@@ -229,9 +229,11 @@ async function createAgreement(opts) {
       signatureType: opts.signatureType || 'ESIGN',
       state: 'IN_PROCESS',
       message: opts.message || 'Please review and sign the attached document.',
+      emailOption: { sendOptions: 'NONE' },
       // Combine the namespace directly into the id string:
       externalId: { 
-          id: `DW_BRIDGE:${opts.externalId}` 
+          id: `DW_BRIDGE:${opts.externalId}`,
+          source: 'DW_BRIDGE',
       }
   };
 
@@ -248,6 +250,42 @@ async function createAgreement(opts) {
 
   logger.info('[SIGN] Agreement created', { agreementId: res.data.id });
   return { agreementId: res.data.id };
+}
+
+async function getSigningUrl(agreementId, signers) {
+  var signer = null;
+  var signerOrder = Infinity;
+  signers.forEach(function(item, index) {
+    if ((item.role || 'SIGNER').toUpperCase() !== 'SIGNER') return;
+    var order = item.order != null ? item.order : index + 1;
+    if (order < signerOrder) {
+      signer = item;
+      signerOrder = order;
+    }
+  });
+  if (!signer) throw new Error('At least one SIGNER is required to retrieve a signing URL');
+
+  var auth = await authHeader();
+  var res = await withRetry(
+    function() {
+      return axios.get(apiBase() + '/agreements/' + agreementId + '/signingUrls', {
+        headers: auth,
+      });
+    },
+    { label: 'sign-getSigningUrl' }
+  );
+  var sets = res.data && res.data.signingUrlSetInfos;
+  var signingUrls = [];
+  (Array.isArray(sets) ? sets : []).forEach(function(set) {
+    if (Array.isArray(set.signingUrls)) signingUrls = signingUrls.concat(set.signingUrls);
+  });
+  var recipient = signingUrls.find(function(item) {
+    return (item.email || '').toLowerCase() === signer.email.toLowerCase();
+  });
+  if (!recipient || !recipient.signingUrl) {
+    throw new Error('Adobe Sign did not return a signing URL for the first signer');
+  }
+  return recipient.signingUrl;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +445,7 @@ module.exports = {
   getAccessToken:          getAccessToken,
   uploadTransientDocument: uploadTransientDocument,
   createAgreement:         createAgreement,
+  getSigningUrl:           getSigningUrl,
   ensureAccountWebhook:    ensureAccountWebhook,
   downloadSignedDocument:  downloadSignedDocument,
   getAgreementDetails:     getAgreementDetails,

@@ -1,12 +1,12 @@
 {
-  "name": "dw-sign-bridge",
+  "name": "rtpa-dw-sign-bridge",
   "version": "1.0.0",
   "description": "DocuWare ↔ Adobe Acrobat Sign e-signature middleware",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "jest --runInBand --forceExit"
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand --forceExit"
   },
   "dependencies": {
     "axios": "^1.7.2",
@@ -15,6 +15,8 @@
     "express": "^4.19.2",
     "form-data": "^4.0.0",
     "morgan": "^1.10.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.8.69",
     "uuid": "^10.0.0",
     "winston": "^3.13.0"
   },

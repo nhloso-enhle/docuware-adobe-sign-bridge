@@ -21,7 +21,7 @@
  *      -> externalId.id was encoded as "fileCabinetId|documentId"
  *      -> Re-fetch the section list from DocuWare to get sectionId
  *   4. Download signed combined PDF from Adobe Sign
- *   5. Append the signed PDF as a new section on the same document record
+ *   5. Replace only the transmittal pages in the original PDF section
  *   6. Update STATUS index field to "Signed"
  *   7. Mark job SIGNED in store
  */
@@ -32,6 +32,7 @@ const docuware = require('../services/docuware');
 const sign     = require('../services/adobeSign');
 const jobStore = require('../utils/jobStore');
 const logger   = require('../utils/logger');
+const pdfSections = require('../services/pdfSections');
 
 // ---------------------------------------------------------------------------
 // GET: verification challenge
@@ -130,26 +131,34 @@ async function processCompletedAgreement(agreementId) {
     // 1. Download signed combined PDF from Adobe Sign
     var signedPdfBuffer = await sign.downloadSignedDocument(agreementId);
 
-    // 2. Append the signed PDF as a NEW section on the same document.
-    //    POST .../Documents/{documentId}/Sections?fileName=...
-    //    Content-Type: application/pdf (raw binary)
-    //    The original section is left untouched -- both PDFs coexist
-    //    in the same file cabinet record.
-    var signedFileName = fileName.replace(/\.pdf$/i, '_signed.pdf');
+    // Re-detect the letter in the current master before replacing it. This
+    // avoids overwriting unrelated pages if the master changed while signing.
+    var masterPdf = await docuware.downloadSection(fileCabinetId, sectionId);
+    var range = await pdfSections.findTransmittalPages(masterPdf);
+    logger.info('[SIGN-WEBHOOK] Replacing detected transmittal pages', {
+      documentId: documentId,
+      startPage: range.startPage,
+      endPage: range.endPage,
+    });
+    var replacementPdf = await pdfSections.replacePageRange(
+      masterPdf,
+      signedPdfBuffer,
+      range.startPage,
+      range.endPage
+    );
     await docuware.replaceSectionData(
       fileCabinetId,
       sectionId,
-      signedPdfBuffer,
-      signedFileName
+      replacementPdf,
+      fileName
     );
 
-    // 3. Update STATUS index field (non-fatal -- signed PDF is already
-    //    appended; a misconfigured STATUS field should not mark the job as ERROR)
+    // 3. Update STATUS index field after the master PDF is safely replaced.
     try {
       await docuware.markDocumentSigned(fileCabinetId, documentId);
     } catch (statusErr) {
       logger.warn('[SIGN-WEBHOOK] Could not set Signed status -- ' +
-        'signed PDF was appended successfully. ' +
+        'signed PDF was written successfully. ' +
         'Check DW_STATUS_FIELD and DW_STATUS_SIGNED_VALUE in .env.', {
         documentId: documentId,
         error:      statusErr.message,

@@ -31,14 +31,24 @@ jest.mock('../src/services/docuware', () => ({
   ]),
   downloadSection:      jest.fn().mockResolvedValue(Buffer.from('%PDF-1.4 fake')),
   replaceSectionData:   jest.fn().mockResolvedValue(undefined),
-  appendSection:        jest.fn().mockResolvedValue(undefined),
   updateIndexFields:    jest.fn().mockResolvedValue({}),
+}));
+
+jest.mock('../src/services/pdfSections', () => ({
+  extractTransmittalLetter: jest.fn().mockResolvedValue({
+    startPage: 1,
+    endPage: 2,
+    pdfBuffer: Buffer.from('%PDF-1.4 transmittal'),
+  }),
+  findTransmittalPages: jest.fn().mockResolvedValue({ startPage: 1, endPage: 2 }),
+  replacePageRange: jest.fn().mockResolvedValue(Buffer.from('%PDF-1.4 master-signed')),
 }));
 
 jest.mock('../src/services/adobeSign', () => ({
   getAccessToken:          jest.fn().mockResolvedValue('mock-access-token'),
   uploadTransientDocument: jest.fn().mockResolvedValue('TRANS-001'),
   createAgreement:         jest.fn().mockResolvedValue({ agreementId: 'AGR-001' }),
+  getSigningUrl:           jest.fn().mockResolvedValue('https://sign.example.com/recipient'),
   ensureAccountWebhook:    jest.fn().mockResolvedValue(undefined),
   downloadSignedDocument:  jest.fn().mockResolvedValue(Buffer.from('%PDF-1.4 signed')),
   getAgreementStatus:      jest.fn().mockResolvedValue('COMPLETED'),
@@ -144,42 +154,41 @@ describe('POST /webhooks/docuware', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 200 and logs error when documentId is missing (never 400 to DocuWare)', async () => {
+  it('returns 400 when documentId is missing', async () => {
     const body = { signers: [{ email: 'a@b.com' }] };
     const res = await request(app)
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    // Always 200 -- DocuWare must never see a non-200 or it retries
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
     await flushAsync();
     // Validation error logged, signing flow NOT started
     expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
 
-  it('returns 200 and logs error when signers is empty', async () => {
+  it('returns 400 when signers is empty', async () => {
     const body = { documentId: '1', signers: [] };
     const res = await request(app)
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
     await flushAsync();
     expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
 
-  it('returns 200 and logs error when a signer has no email', async () => {
+  it('returns 400 when a signer has no email', async () => {
     const body = { documentId: '1', signers: [{ name: 'No Email' }] };
     const res = await request(app)
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
     await flushAsync();
     expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
 
-  it('returns 202 and runs the full DW -> Sign flow with encoded externalId', async () => {
+  it('waits for the URL index update and runs the full DW -> Sign flow', async () => {
     const res = await request(app)
       .post('/webhooks/docuware')
       .set(dwHeaders(VALID_BODY))
@@ -192,13 +201,23 @@ describe('POST /webhooks/docuware', () => {
       VALID_BODY.fileCabinetId, '12345'
     );
     expect(sign.uploadTransientDocument).toHaveBeenCalledWith(
-      expect.any(Buffer), 'invoice.pdf'
+      expect.any(Buffer), 'invoice_transmittal.pdf'
     );
     // externalId must encode fileCabinetId|documentId
     expect(sign.createAgreement).toHaveBeenCalledWith(
       expect.objectContaining({
         externalId: VALID_BODY.fileCabinetId + '|12345',
       })
+    );
+    expect(sign.getSigningUrl).toHaveBeenCalledWith('AGR-001', VALID_BODY.signers);
+    expect(docuware.updateIndexFields).toHaveBeenCalledWith(
+      VALID_BODY.fileCabinetId,
+      '12345',
+      [{
+        FieldName: 'E_SIGNATURE_URL',
+        Item: 'https://sign.example.com/recipient',
+        ItemElementName: 'String',
+      }]
     );
 
     // Each signer maps to its own participantSet (1:1 mapping)
@@ -265,7 +284,7 @@ describe('POST /webhooks/docuware', () => {
     );
   });
 
-  it('returns 200 and logs error for an invalid role value', async () => {
+  it('returns 400 for an invalid role value', async () => {
     const body = {
       documentId: '1',
       signers: [{ email: 'a@b.com', role: 'DICTATOR' }],
@@ -274,7 +293,7 @@ describe('POST /webhooks/docuware', () => {
       .post('/webhooks/docuware')
       .set(dwHeaders(body))
       .send(body);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(400);
     await flushAsync();
     expect(docuware.getDocumentSections).not.toHaveBeenCalled();
   });
@@ -329,7 +348,7 @@ describe('POST /webhooks/adobe-sign (event delivery)', () => {
     expect(sign.downloadSignedDocument).not.toHaveBeenCalled();
   });
 
-  it('downloads signed PDF, replaces section, marks document Signed', async () => {
+  it('replaces only the signed transmittal pages and marks document Signed', async () => {
     jobStore.set('AGR-FULL', {
       agreementId:   'AGR-FULL',
       fileCabinetId: 'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d',
@@ -347,14 +366,16 @@ describe('POST /webhooks/adobe-sign (event delivery)', () => {
     await flushAsync();
 
     expect(sign.downloadSignedDocument).toHaveBeenCalledWith('AGR-FULL');
-    // Signed PDF is appended as a new section -- original section untouched
-    expect(docuware.appendSection).toHaveBeenCalledWith(
+    expect(docuware.downloadSection).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d',
-      '55555',
-      expect.any(Buffer),
-      'contract_signed.pdf'
+      'SEC-99'
     );
-    expect(docuware.replaceSectionData).not.toHaveBeenCalled();
+    expect(docuware.replaceSectionData).toHaveBeenCalledWith(
+      'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d',
+      'SEC-99',
+      expect.any(Buffer),
+      'contract.pdf'
+    );
     expect(docuware.markDocumentSigned).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d', '55555'
     );
@@ -375,17 +396,16 @@ describe('POST /webhooks/adobe-sign (event delivery)', () => {
     expect(docuware.getDocumentSections).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d', '55555'
     );
-    // Should have downloaded and appended signed PDF
+    // Should have downloaded and replaced the signed transmittal pages
     expect(sign.downloadSignedDocument).toHaveBeenCalledWith('AGR-RECOVER');
-    expect(docuware.appendSection).toHaveBeenCalled();
-    expect(docuware.replaceSectionData).not.toHaveBeenCalled();
+    expect(docuware.replaceSectionData).toHaveBeenCalled();
     expect(docuware.markDocumentSigned).toHaveBeenCalledWith(
       'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d', '55555'
     );
   });
 
   it('marks job ERROR when DocuWare write fails', async () => {
-    docuware.appendSection.mockRejectedValueOnce(new Error('DW 500'));
+    docuware.replaceSectionData.mockRejectedValueOnce(new Error('DW 500'));
     jobStore.set('AGR-ERR', {
       agreementId: 'AGR-ERR', fileCabinetId: 'fc-1', documentId: '77777',
       sectionId: 'SEC-ERR', fileName: 'doc.pdf',
