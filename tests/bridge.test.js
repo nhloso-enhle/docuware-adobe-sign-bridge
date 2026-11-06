@@ -64,8 +64,7 @@ jest.mock('../src/services/adobeSign', () => ({
     id:         'AGR-RECOVER',
     status:     'SIGNED',
     externalId: {
-      id:     'e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d|55555',
-      source: 'DW_BRIDGE',
+      id: 'DW_BRIDGE:e6ecd4a1-fa7b-4644-b1fb-df7ce7e8cd2d|55555',
     },
   }),
 }));
@@ -392,7 +391,7 @@ describe('POST /webhooks/adobe-sign (event delivery)', () => {
 
   it('recovers from Adobe Sign externalId when job not in store (server restart)', async () => {
     // No job seeded -- simulates post-restart state
-    // getAgreementDetails mock returns externalId "fileCabinetId|documentId"
+    // getAgreementDetails returns the bridge prefix in ExternalId.id.
     await request(app)
       .post('/webhooks/adobe-sign')
       .send({ event: 'AGREEMENT_WORKFLOW_COMPLETED', agreement: { id: 'AGR-RECOVER' } });

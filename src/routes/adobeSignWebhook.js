@@ -221,7 +221,11 @@ async function recoverJobFromAdobeSign(agreementId) {
   }
 
   var externalId = details.externalId;
-  if (!externalId || externalId.source !== 'DW_BRIDGE' || !externalId.id) {
+  var externalIdValue = externalId && externalId.id;
+  var hasBridgePrefix = typeof externalIdValue === 'string'
+    && externalIdValue.indexOf('DW_BRIDGE:') === 0;
+  var legacyBridgeSource = externalId && externalId.source === 'DW_BRIDGE';
+  if ((!hasBridgePrefix && !legacyBridgeSource) || !externalIdValue) {
     logger.warn('[SIGN-WEBHOOK] Agreement externalId missing or not from DW_BRIDGE', {
       agreementId: agreementId,
       externalId:  externalId,
@@ -229,8 +233,12 @@ async function recoverJobFromAdobeSign(agreementId) {
     return null;
   }
 
-  // externalId.id was encoded as "fileCabinetId|documentId"
-  var parts = externalId.id.split('|');
+  // The bridge namespace is embedded in id because Adobe's ExternalId model
+  // accepts only that property. Older agreements may also return source.
+  var rawExternalId = hasBridgePrefix
+    ? externalIdValue.slice('DW_BRIDGE:'.length)
+    : externalIdValue;
+  var parts = rawExternalId.split('|');
   if (parts.length !== 2) {
     logger.warn('[SIGN-WEBHOOK] externalId.id not in expected "fileCabinetId|documentId" format', {
       externalId: externalId.id,

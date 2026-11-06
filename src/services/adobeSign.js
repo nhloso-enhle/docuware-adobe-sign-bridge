@@ -233,7 +233,6 @@ async function createAgreement(opts) {
       // Combine the namespace directly into the id string:
       externalId: { 
           id: `DW_BRIDGE:${opts.externalId}`,
-          source: 'DW_BRIDGE',
       }
   };
 
