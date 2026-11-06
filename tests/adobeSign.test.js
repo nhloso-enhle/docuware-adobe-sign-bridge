@@ -59,7 +59,13 @@ describe('Adobe Sign recipient signing URL', () => {
     const request = axios.post.mock.calls.find(function(call) {
       return call[0].endsWith('/agreements');
     });
-    expect(request[1].emailOption).toEqual({ sendOptions: 'NONE' });
+    expect(request[1].emailOption).toEqual({
+      sendOptions: {
+        initEmails: 'NONE',
+        inFlightEmails: 'NONE',
+        completionEmails: 'NONE',
+      },
+    });
     expect(request[1].externalId).toEqual({
       id: 'DW_BRIDGE:cabinet|document',
     });

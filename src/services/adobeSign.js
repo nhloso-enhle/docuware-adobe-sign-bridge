@@ -229,7 +229,13 @@ async function createAgreement(opts) {
       signatureType: opts.signatureType || 'ESIGN',
       state: 'IN_PROCESS',
       message: opts.message || 'Please review and sign the attached document.',
-      emailOption: { sendOptions: 'NONE' },
+      emailOption: {
+        sendOptions: {
+          initEmails: 'NONE',
+          inFlightEmails: 'NONE',
+          completionEmails: 'NONE',
+        },
+      },
       // Combine the namespace directly into the id string:
       externalId: { 
           id: `DW_BRIDGE:${opts.externalId}`,

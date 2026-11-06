@@ -302,6 +302,10 @@ The Web Service Activity returns success only after the agreement is created
 and that field is updated. Configure the Email activity recipient separately
 as appropriate for your workflow.
 
+The bridge suppresses Adobe Sign initiation, in-flight, and completion emails
+through the agreement's `emailOption.sendOptions` settings, so DocuWare remains
+the notification channel.
+
 ---
 
 ## 7. Adobe Acrobat Sign Configuration
